@@ -24,7 +24,7 @@
 
 use crate::ai::AiProvider;
 use crate::backport::{BackportCandidate, walk_range};
-use crate::db::{Database, Finding, Severity};
+use crate::db::{Database, Severity};
 use crate::worker::backport_stages::{BackportStageRunner, Concern, StageInput};
 use crate::worker::tools::ToolBox;
 use anyhow::{Context, Result, bail};
@@ -315,7 +315,7 @@ async fn review_one(
     })
 }
 
-async fn persist_concerns(db: &Database, review_id: i64, concerns: &[Concern]) {
+async fn persist_concerns(db: &Database, backport_review_id: i64, concerns: &[Concern]) {
     for c in concerns {
         let severity = severity_from_str(&c.severity);
         let problem = if let Some(ev) = &c.evidence {
@@ -332,17 +332,17 @@ async fn persist_concerns(db: &Database, review_id: i64, concerns: &[Concern]) {
         } else {
             format!("[{}] {}", c.kind, c.problem)
         };
-        let severity_explanation = Some(format!("stage {}", c.stage));
+        let stage_label = format!("stage {}", c.stage);
         if let Err(e) = db
-            .create_finding(Finding {
-                review_id, // Reused as the foreign key; the dashboard knows to look at backport_review_id when it's set on the row instead. For now we point both to the backport row id; the existing reviews table id space is disjoint enough that this is unambiguous in practice.
+            .create_backport_finding(
+                backport_review_id,
                 severity,
-                severity_explanation,
-                problem,
-            })
+                Some(&stage_label),
+                &problem,
+            )
             .await
         {
-            warn!("failed to persist finding: {e}");
+            warn!("failed to persist backport finding: {e}");
         }
     }
 }

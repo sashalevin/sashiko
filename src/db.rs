@@ -1111,16 +1111,14 @@ impl Database {
             return Ok(None);
         };
 
-        // Findings come from the existing findings table where
-        // backport_review_id = id. Fall back to review_id matches when
-        // backport_review_id is null on legacy rows.
+        // Findings come from the dedicated backport_findings table.
         let mut detail = detail;
         let mut frows = self
             .conn
             .query(
-                "SELECT severity, severity_explanation, problem FROM findings \
-                 WHERE backport_review_id = ? OR (backport_review_id IS NULL AND review_id = ?)",
-                libsql::params![id, id],
+                "SELECT severity, severity_explanation, problem FROM backport_findings \
+                 WHERE backport_review_id = ? ORDER BY severity DESC, id ASC",
+                libsql::params![id],
             )
             .await?;
         while let Ok(Some(row)) = frows.next().await {
@@ -1290,6 +1288,32 @@ impl Database {
                     finding.severity as i32,
                     finding.severity_explanation,
                     finding.problem,
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Insert a finding for a backport review. Lives in the dedicated
+    /// `backport_findings` table — the existing `findings` table can't
+    /// be reused because its NOT-NULL FK on review_id rejects
+    /// backport_reviews ids.
+    pub async fn create_backport_finding(
+        &self,
+        backport_review_id: i64,
+        severity: Severity,
+        severity_explanation: Option<&str>,
+        problem: &str,
+    ) -> Result<()> {
+        self.conn
+            .execute(
+                "INSERT INTO backport_findings (backport_review_id, severity, severity_explanation, problem) \
+                 VALUES (?, ?, ?, ?)",
+                libsql::params![
+                    backport_review_id,
+                    severity as i32,
+                    severity_explanation,
+                    problem,
                 ],
             )
             .await?;

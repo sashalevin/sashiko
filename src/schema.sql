@@ -276,6 +276,18 @@ CREATE INDEX IF NOT EXISTS idx_backport_reviews_version ON backport_reviews(targ
 CREATE INDEX IF NOT EXISTS idx_backport_reviews_verdict ON backport_reviews(verdict);
 CREATE INDEX IF NOT EXISTS idx_backport_reviews_upstream ON backport_reviews(upstream_sha);
 
--- The findings.backport_review_id column is added by Database::migrate_findings()
--- in db.rs (idempotent ALTER) so this schema can be re-run cleanly.
+-- Findings dedicated to backport reviews. Kept separate from the
+-- existing `findings` table because that table's review_id column is
+-- NOT NULL with a FK to reviews(id), which libsql enforces and we
+-- cannot reuse for backport_reviews ids.
+CREATE TABLE IF NOT EXISTS backport_findings (
+    id INTEGER PRIMARY KEY,
+    backport_review_id INTEGER NOT NULL,
+    severity INTEGER NOT NULL,
+    severity_explanation TEXT,
+    problem TEXT,
+    FOREIGN KEY(backport_review_id) REFERENCES backport_reviews(id)
+);
+CREATE INDEX IF NOT EXISTS idx_backport_findings_review ON backport_findings(backport_review_id);
+CREATE INDEX IF NOT EXISTS idx_backport_findings_severity ON backport_findings(severity);
 
