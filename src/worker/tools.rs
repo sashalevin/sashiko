@@ -203,6 +203,40 @@ impl ToolBox {
                     "required": ["content"]
                 }),
             },
+            AiTool {
+                name: "lei_search".to_string(),
+                description: "Search lore.kernel.org via the local `lei` index. Always uses `--no-save`, so the user's saved-search index is never modified. Returns up to `limit` matching messages with mid/subject/from/date. Use this for follow-up-fix searches (e.g. \"Fixes:<sha>\"), revert searches, or finding discussion of a commit on the mailing list.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "lei query string. Example: 'Fixes:abcdef0000', 's:\"some subject\"', 'mid:<msgid@host>'." },
+                        "limit": { "type": "integer", "description": "Max hits to return (default 20, max 200)." }
+                    },
+                    "required": ["query"]
+                }),
+            },
+            AiTool {
+                name: "b4_dig".to_string(),
+                description: "Look up the lore discussion thread for a commit (`b4 dig -c <sha>`) or a message-id (`b4 dig <mid>`). Returns b4's raw stdout including any related lore links. Use to find the original patch posting and follow-up fixes for a commit.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "input": { "type": "string", "description": "A 7-64 char hex commit SHA, OR a Message-Id (with or without surrounding angle brackets)." }
+                    },
+                    "required": ["input"]
+                }),
+            },
+            AiTool {
+                name: "lore_thread".to_string(),
+                description: "Fetch the canonical lore.kernel.org thread for a Message-Id and return parsed messages (from/subject/date/body). Use when you have a specific message-id (e.g. from b4_dig output) and want to read the thread.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "message_id": { "type": "string", "description": "Message-Id (with or without surrounding angle brackets)." }
+                    },
+                    "required": ["message_id"]
+                }),
+            },
         ];
 
         if self.prompts_path.is_some() {
@@ -239,8 +273,35 @@ impl ToolBox {
             "find_files" => self.find_files(args).await,
             "todowrite" => self.todowrite(args).await,
             "read_prompt" => self.read_prompt(args).await,
+            "lei_search" => self.lei_search_tool(args).await,
+            "b4_dig" => self.b4_dig_tool(args).await,
+            "lore_thread" => self.lore_thread_tool(args).await,
             _ => Err(anyhow!("Unknown tool: {}", name)),
         }
+    }
+
+    async fn lei_search_tool(&self, args: Value) -> Result<Value> {
+        let query = args["query"]
+            .as_str()
+            .ok_or_else(|| anyhow!("lei_search: missing 'query' string"))?;
+        let limit = args["limit"].as_u64().unwrap_or(0) as usize;
+        let cfg = crate::worker::lei_tools::LeiToolConfig::default();
+        Ok(crate::worker::lei_tools::lei_search(query, limit, &cfg.lei_bin).await)
+    }
+
+    async fn b4_dig_tool(&self, args: Value) -> Result<Value> {
+        let input = args["input"]
+            .as_str()
+            .ok_or_else(|| anyhow!("b4_dig: missing 'input' string"))?;
+        let cfg = crate::worker::lei_tools::LeiToolConfig::default();
+        Ok(crate::worker::lei_tools::b4_dig(input, &cfg.b4_bin).await)
+    }
+
+    async fn lore_thread_tool(&self, args: Value) -> Result<Value> {
+        let mid = args["message_id"]
+            .as_str()
+            .ok_or_else(|| anyhow!("lore_thread: missing 'message_id' string"))?;
+        Ok(crate::worker::lei_tools::lore_thread(mid).await)
     }
 
     fn truncate_output(&self, output: String) -> String {
