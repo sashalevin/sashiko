@@ -216,6 +216,13 @@ async fn review_one(
         )
         .await?;
 
+    // Re-runs (--no-cache, or queue_sha changed): drop stale findings
+    // and clear the cached verdict before we write fresh ones, so the
+    // dashboard never mixes concerns from two runs.
+    if let Err(e) = db.prepare_backport_review_for_run(review_id).await {
+        warn!("failed to reset backport review {review_id} for re-run: {e}");
+    }
+
     let context_tag = format!("[bp:{} v:{}]", short_sha(&upstream_sha), cfg.target_version);
 
     // Read queue and upstream commit data once up-front so each stage

@@ -1294,6 +1294,30 @@ impl Database {
         Ok(())
     }
 
+    /// Reset a backport review row before re-running it: drop any
+    /// findings persisted by a prior run and clear the cached
+    /// verdict/summary/tokens so the row reflects the current attempt
+    /// rather than yesterday's. Called by the orchestrator immediately
+    /// after `upsert_backport_review` when a re-run is starting.
+    pub async fn prepare_backport_review_for_run(&self, id: i64) -> Result<()> {
+        self.conn
+            .execute(
+                "DELETE FROM backport_findings WHERE backport_review_id = ?",
+                libsql::params![id],
+            )
+            .await?;
+        self.conn
+            .execute(
+                "UPDATE backport_reviews SET status = 'In Review', verdict = NULL, \
+                 confidence = NULL, summary = NULL, logs = NULL, failed_reason = NULL, \
+                 tokens_in = NULL, tokens_out = NULL, tokens_cached = NULL, \
+                 completed_at = NULL WHERE id = ?",
+                libsql::params![id],
+            )
+            .await?;
+        Ok(())
+    }
+
     /// Insert a finding for a backport review. Lives in the dedicated
     /// `backport_findings` table — the existing `findings` table can't
     /// be reused because its NOT-NULL FK on review_id rejects
