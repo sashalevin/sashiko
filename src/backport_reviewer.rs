@@ -77,11 +77,7 @@ pub struct BackportReviewer {
 }
 
 impl BackportReviewer {
-    pub fn new(
-        db: Arc<Database>,
-        provider: Arc<dyn AiProvider>,
-        concurrency: usize,
-    ) -> Self {
+    pub fn new(db: Arc<Database>, provider: Arc<dyn AiProvider>, concurrency: usize) -> Self {
         let concurrency = concurrency.max(1);
         Self {
             db,
@@ -220,11 +216,7 @@ async fn review_one(
         )
         .await?;
 
-    let context_tag = format!(
-        "[bp:{} v:{}]",
-        short_sha(&upstream_sha),
-        cfg.target_version
-    );
+    let context_tag = format!("[bp:{} v:{}]", short_sha(&upstream_sha), cfg.target_version);
 
     // Read queue and upstream commit data once up-front so each stage
     // sees identical inputs. Falls back gracefully if the upstream show

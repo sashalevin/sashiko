@@ -386,9 +386,8 @@ mod tests {
 
     #[tokio::test]
     async fn lei_search_parses_array_payload() {
-        // Stub: a shell that ignores its args and emits a known JSON array.
         let json_body = r#"[{"m":"<a@b>","s":"subj","f":"alice","d":"2026-01-01T00:00:00Z"},null]"#;
-        let stub = stub_path("lei-stub");
+        let (_dir, stub) = stub_in_tempdir("lei");
         write_stub(&stub, &format!("#!/bin/sh\nprintf '%s' '{json_body}'\n"));
         let v = lei_search("Fixes:deadbeef", 5, stub.to_str().unwrap()).await;
         assert_eq!(v["ok"].as_bool(), Some(true), "got {v}");
@@ -400,7 +399,7 @@ mod tests {
 
     #[tokio::test]
     async fn lei_search_handles_empty_output() {
-        let stub = stub_path("lei-empty");
+        let (_dir, stub) = stub_in_tempdir("lei");
         write_stub(&stub, "#!/bin/sh\nprintf ''\n");
         let v = lei_search("anything", 5, stub.to_str().unwrap()).await;
         assert_eq!(v["ok"].as_bool(), Some(true));
@@ -415,7 +414,7 @@ mod tests {
 
     #[tokio::test]
     async fn b4_dig_returns_stdout_on_success() {
-        let stub = stub_path("b4-stub");
+        let (_dir, stub) = stub_in_tempdir("b4");
         write_stub(&stub, "#!/bin/sh\necho \"called: $*\"\n");
         let v = b4_dig("deadbeefcafe", stub.to_str().unwrap()).await;
         assert_eq!(v["ok"].as_bool(), Some(true), "got {v}");
@@ -429,7 +428,7 @@ mod tests {
 
     #[tokio::test]
     async fn b4_dig_omits_dash_c_for_message_id() {
-        let stub = stub_path("b4-mid");
+        let (_dir, stub) = stub_in_tempdir("b4");
         write_stub(&stub, "#!/bin/sh\necho \"called: $*\"\n");
         let v = b4_dig("<20260101.deadbeef@example.com>", stub.to_str().unwrap()).await;
         let out = v["output"].as_str().unwrap_or("");
@@ -439,10 +438,13 @@ mod tests {
         );
     }
 
-    fn stub_path(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("sashiko-lei-stub-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir.join(name)
+    /// Returns a fresh `(TempDir, PathBuf)` pair so each test gets a
+    /// dedicated, parallel-safe stub script directory. The TempDir handle
+    /// keeps the directory alive for the lifetime of the test.
+    fn stub_in_tempdir(name: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join(name);
+        (dir, path)
     }
 
     fn write_stub(path: &std::path::Path, content: &str) {

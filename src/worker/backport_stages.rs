@@ -50,7 +50,7 @@ const DEFAULT_STAGE_TEMPERATURE: f32 = 0.2;
 #[derive(Debug, Clone)]
 pub struct StageInput {
     pub queue_sha: String,
-    pub queue_branch: String,   // e.g. "stable-rc/queue/6.12"
+    pub queue_branch: String, // e.g. "stable-rc/queue/6.12"
     pub queue_subject: String,
     pub queue_body: String,
     pub queue_diff: String,
@@ -231,7 +231,11 @@ impl BackportStageRunner {
         let final_text = loop {
             turns += 1;
             if turns > self.turn_budget {
-                bail!("stage {} exceeded turn budget of {}", stage, self.turn_budget);
+                bail!(
+                    "stage {} exceeded turn budget of {}",
+                    stage,
+                    self.turn_budget
+                );
             }
 
             let req = AiRequest {
@@ -240,7 +244,11 @@ impl BackportStageRunner {
                 tools: Some(self.tools.get_declarations_generic()),
                 temperature: Some(self.temperature),
                 response_format: None,
-                context_tag: Some(format!("{} s:{}] ", self.context_tag.trim_end_matches(']'), stage)),
+                context_tag: Some(format!(
+                    "{} s:{}] ",
+                    self.context_tag.trim_end_matches(']'),
+                    stage
+                )),
             };
 
             let resp = self
@@ -418,8 +426,12 @@ fn parse_stage_payload(text: &str) -> Result<StagePayload> {
 
 fn parse_synthesis_payload(text: &str) -> Result<SynthesisPayload> {
     let json = strip_fences(text);
-    let v: Value = serde_json::from_str(&json)
-        .map_err(|e| anyhow::anyhow!("synthesis not valid JSON: {e}; got: {}", trim_for_log(&json)))?;
+    let v: Value = serde_json::from_str(&json).map_err(|e| {
+        anyhow::anyhow!(
+            "synthesis not valid JSON: {e}; got: {}",
+            trim_for_log(&json)
+        )
+    })?;
     let mut p: SynthesisPayload = serde_json::from_value(v)?;
     let v = p.verdict.trim().to_ascii_lowercase();
     if !matches!(v.as_str(), "yes" | "no" | "needs_review") {
@@ -644,17 +656,18 @@ fn build_stage_user_prompt(stage: u8, input: &StageInput, prior: &[StageRecord])
                 rec.stage_summary.trim()
             ));
             for c in &rec.concerns {
-                s.push_str(&format!(
-                    "  - [{}] {}: {}\n",
-                    c.severity, c.kind, c.problem
-                ));
+                s.push_str(&format!("  - [{}] {}: {}\n", c.severity, c.kind, c.problem));
             }
         }
         s.push_str("</prior_stage_findings>\n");
         s
     };
 
-    let upstream_block = match (&input.upstream_sha, &input.upstream_body, &input.upstream_diff) {
+    let upstream_block = match (
+        &input.upstream_sha,
+        &input.upstream_body,
+        &input.upstream_diff,
+    ) {
         (Some(sha), Some(body), Some(diff)) => format!(
             "\n\n<upstream_commit sha=\"{sha}\">\n<message>\n{body}\n</message>\n<diff>\n{diff}\n</diff>\n</upstream_commit>",
             sha = sha,
@@ -822,7 +835,10 @@ mod tests {
             target_branch: "linux-6.12.y".into(),
         };
         let s = shared_system_prompt(&input);
-        assert!(s.contains("--no-save"), "system prompt must mention --no-save");
+        assert!(
+            s.contains("--no-save"),
+            "system prompt must mention --no-save"
+        );
         assert!(s.contains("6.12"));
     }
 }
