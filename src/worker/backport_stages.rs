@@ -552,13 +552,69 @@ fn stage_instruction(stage: u8, input: &StageInput) -> String {
     match stage {
         1 => STAGE_1.to_string(),
         2 => STAGE_2.to_string(),
-        3 => STAGE_3.to_string(),
+        3 => stage_3(input),
         4 => STAGE_4.to_string(),
         5 => stage_5(input),
         6 => stage_6(input),
         7 => stage_7(input),
         _ => String::new(),
     }
+}
+
+fn stage_3(input: &StageInput) -> String {
+    let tb = &input.target_branch;
+    let qsha = &input.queue_sha;
+    format!(
+        "STAGE 3 — Dependency verification.\n\n\
+This is the most important load-bearing check. The reference for\n\
+\"reachable when this commit applies\" is {qsha}^ — the parent of the\n\
+queue commit, which represents the state of the tree right before\n\
+this cherry-pick lands. It includes everything in {tb} plus every\n\
+queued commit applied ahead of this one, but NOT this commit itself\n\
+or any later queue commits.\n\n\
+3.1 FIXES: TARGETS. For every Fixes: trailer captured in stage 1:\n\
+    - Confirm the buggy commit resolves: `git_show <buggy_sha>` (with\n\
+      `suppress_diff:true` to keep the response small).\n\
+    - Confirm reachability from {qsha}^:\n\
+        `git_log --oneline <buggy_sha>..{qsha}^ -n 1`\n\
+      Any output means the buggy commit IS an ancestor (present when\n\
+      this patch lands). No output / error means it ISN'T.\n\
+    - Cross-check directly in the released tree:\n\
+        `git_log --oneline {tb} --grep='<buggy-subject-keyword>' -n 5`\n\
+3.2 CODE CONTEXT MATCHES IN THE TARGET TREE. For every file modified\n\
+    in the diff, read it as it exists at {qsha}^ via\n\
+    `git_show {qsha}^:<file_path>`. Compare the context lines around\n\
+    each hunk to what's actually in {qsha}^. Even if the patch applies\n\
+    cleanly, semantics may differ (reordered ops, refactored error\n\
+    paths, double-unlock from different cleanup structure). Concrete\n\
+    failure modes seen in real RC reviews:\n\
+      * disable_irq() reordered relative to netif_napi_del()\n\
+      * unlock-on-error path that double-unlocks because the target\n\
+        tree's error path already unlocks\n\
+      * put_device() called when device_initialize() prerequisite\n\
+        is absent from this version, causing a crash\n\
+3.3 NEW SYMBOLS USED BY THE PATCH MUST EXIST AT {qsha}^. For each new\n\
+    function call / macro / struct field / type the patch introduces,\n\
+    confirm it exists at {qsha}^:\n\
+      `search_file_content '<symbol>' {qsha}^`\n\
+      `git_show {qsha}^:<header>` for struct field checks.\n\
+    Real examples of missing-dependency failures: `.remove_new`\n\
+    callback added to platform_driver in v6.3 (absent in 5.10/5.15);\n\
+    `struct devlink_fmsg.err` field absent in older kernels.\n\
+3.4 OTHER QUEUED PATCHES IN THE SAME AREA. Use lei_search and\n\
+    git_log on {qsha}^ -- <file> to find related queued or recently\n\
+    released patches. If this commit depends on another commit that\n\
+    is queued AFTER this one (i.e. NOT reachable from {qsha}^), that's\n\
+    an ordering bug — flag it.\n\
+3.5 PREREQUISITE COMMITS IN MAINLINE. If 3.2 or 3.3 found missing\n\
+    code, identify the upstream commit that introduced it. Then check\n\
+    whether that commit is queued anywhere in the {ver} queue (via\n\
+    lei_search 'Fixes:<prereq>' or by subject) — if not, this is a\n\
+    MISSING DEPENDENCY and a NO.\n\n\
+Tools: git_log, git_show, git_show <ref>:<path>, search_file_content,\n\
+lei_search.",
+        ver = input.target_version
+    )
 }
 
 const STAGE_OUTPUT_CONTRACT: &str = "OUTPUT FORMAT: when you are done with this stage, respond with a SINGLE \
@@ -659,21 +715,7 @@ a concern — it's information for downstream stages.\n\n\
 Tools: git_show -p (queue diff), git_show on the upstream SHA for the\n\
 upstream diff comparison.";
 
-const STAGE_3: &str = "STAGE 3 — Dependency verification.\n\n\
-This is the most important load-bearing check. For every Fixes: trailer\n\
-target identified in stage 1, verify whether that target commit is\n\
-reachable from the target stable branch. Use `git_log --oneline\n\
-linux-<ver>.y --grep=<short-subject>` and `git_show` to confirm.\n\n\
-Beyond explicit Fixes:, identify implicit prerequisites: helper\n\
-functions, struct fields, macros, callbacks, or refactored APIs the\n\
-upstream commit relies on. For each, verify the prerequisite is present\n\
-in the target tree (use `search_file_content` and `git_show <ref>:<path>`).\n\
-If a prerequisite is missing in the target tree but present elsewhere in\n\
-the queue, that's still a soft pass. If it's missing both places, that's\n\
-a hard concern.\n\n\
-Use `lei_search` to check whether prerequisite commits have been queued\n\
-separately (e.g. \"<prereq-subject>\" or \"Fixes:<prereq-sha>\" queries).\n\n\
-Tools: git_log, git_show, git_show <ref>:<path>, search_file_content, lei_search.";
+// (Stage 3 uses ref-substituted text via stage_3() below.)
 
 const STAGE_4: &str = "STAGE 4 — Follow-up fix and revert search.\n\n\
 For the upstream SHA, find every commit in `origin/master` that points\n\
@@ -695,53 +737,63 @@ fn stage_5(input: &StageInput) -> String {
     let tb = &input.target_branch;
     let qb = &input.queue_branch;
     let ver = &input.target_version;
+    let qsha = &input.queue_sha;
     format!(
         "STAGE 5 — Version applicability (does the bug exist in THIS tree).\n\n\
 Goal: confirm the conditions for this backport to be meaningful actually\n\
 hold in the target tree. If the bug doesn't exist here, the patch is\n\
 unnecessary and adds risk for no benefit.\n\n\
-CRITICAL: when this commit lands, the *effective* target tree is\n\
-{qb} (everything released in {tb} PLUS everything queued ahead of\n\
-this commit on {qb}). A Fixes: target or prerequisite that is queued\n\
-ahead of this commit IS effectively present once the queue ships. Do\n\
-NOT mark the bug as 'not present' merely because the buggy commit is\n\
-absent from {tb} — also check {qb}. The queue branch contains both\n\
-the released history AND the new patches.\n\n\
-5.1 DOES THE BUG EXIST in the effective target tree?\n\
-    - If a Fixes: trailer is present, look up the buggy commit in BOTH\n\
-      refs:\n\
-        `git_log --oneline {tb} --grep='<buggy-subject-keyword>' -n 5`\n\
-        `git_log --oneline {qb} --grep='<buggy-subject-keyword>' -n 5`\n\
-      Or directly: `git_show <buggy_sha>` to confirm it resolves at all\n\
-      (a successful resolve from the local repo means it's reachable\n\
-      from at least one of the fetched refs). If the buggy commit is in\n\
-      {tb} OR queued ahead of this commit on {qb}, the bug exists and\n\
-      the fix is meaningful. Only when the buggy commit is in NEITHER\n\
-      (introduced after the {ver} branch point AND not queued for\n\
-      {ver}) does this become evidence for a NO.\n\
+THE EFFECTIVE TREE FOR THIS COMMIT IS {qsha}^.\n\
+That ref is the state of the queue branch JUST BEFORE this commit\n\
+applies — it includes everything released in {tb} plus every commit\n\
+queued AHEAD of this one. It does NOT include this commit itself, and\n\
+it does NOT include later queue commits whose presence in {qb}\n\
+post-dates the moment this commit lands. Use {qsha}^ for every\n\
+existence check below — NEVER use {qb} as the existence ref:\n\
+\n\
+  * `git_show {qb}:<path>` would return success even for a NEW file\n\
+    that THIS commit creates, because the queue tip includes this\n\
+    commit. That's circular evidence and would falsely confirm\n\
+    'file exists' when its existence depends on the very patch we\n\
+    are validating.\n\
+  * `git_show {qsha}^:<path>` is the patch's pre-image — exactly what\n\
+    git apply will see when the cherry-pick runs.\n\n\
+5.1 DOES THE BUG EXIST in the effective tree?\n\
+    - If a Fixes: trailer is present, look up the buggy commit:\n\
+        `git_log --oneline {qsha}^ --grep='<buggy-subject-keyword>' -n 5`\n\
+        `git_show <buggy_sha>` (sanity-check it exists at all).\n\
+      Then verify the buggy commit is REACHABLE from {qsha}^:\n\
+        `git_log --oneline <buggy_sha>..{qsha}^ -n 1`\n\
+        — if that emits ANY commit, the buggy commit is an ancestor of\n\
+          {qsha}^, i.e. present when this commit lands. If it errors\n\
+          or emits nothing, the buggy commit is NOT in the effective\n\
+          tree. Cross-check with `git_log --oneline {tb} --grep=...`.\n\
+      The bug exists if the buggy commit is in {tb} OR is reachable\n\
+      from {qsha}^ (queued ahead). If the buggy commit is in NEITHER\n\
+      — introduced after {ver} branched AND not queued ahead of this\n\
+      commit — the bug doesn't exist here. That's evidence for a NO.\n\
     - If no Fixes:: read the upstream pre-image and check whether the\n\
-      bad pattern is reproducible in the target tree (try both {tb} and\n\
-      {qb} ref-scoped reads if they differ in the relevant region).\n\
-      Stage 3.2 already did much of this; cross-reference its findings.\n\
-5.2 FILES AND FUNCTIONS EXIST in the effective target tree:\n\
-    - For every file in the diff: try `git_show {tb}:<path>` first; if\n\
-      404, try `git_show {qb}:<path>` (the file may have been added by\n\
-      a queued commit ahead of this one). Only when BOTH fail is this a\n\
+      bad pattern is reproducible from {qsha}^. Stage 3.2 already did\n\
+      much of this; cross-reference its findings.\n\
+5.2 FILES AND FUNCTIONS EXIST in the effective tree:\n\
+    - For every file in the diff: `git_show {qsha}^:<path>`.\n\
+      Exception: if the diff itself CREATES the file (look at the diff\n\
+      header — `new file mode`), absence from {qsha}^ is expected and\n\
+      not a defect. For every other file, absence from {qsha}^ is a\n\
       hard NO — the patch can't apply.\n\
     - For every modified function: confirm it exists with the expected\n\
-      signature in {tb} or {qb} via `search_file_content` or\n\
-      `git_show <ref>:<path>`.\n\
+      signature via `git_show {qsha}^:<path>` and `search_file_content`.\n\
 5.3 DIVERGENCE ASSESSMENT:\n\
-    - `git_diff {tb} origin/master -- <path>` (use head/wc to gauge\n\
+    - `git_diff {qsha}^ origin/master -- <path>` (use head/wc to gauge\n\
       magnitude without dumping huge diffs).\n\
     - Significant divergence around the modified hunks raises the chance\n\
       of silent semantic mismatch even when the patch applies textually.\n\
       Note the level (minimal / moderate / significant) and call out any\n\
       hunks where divergence overlaps the patch's change region.\n\n\
-Stage 5 concerns are: bug verifiably doesn't exist in {tb} OR {qb},\n\
-file/function missing from BOTH {tb} and {qb}, or significant\n\
-divergence around the patched region. Do NOT raise concerns based on\n\
-{tb}-only checks when the queue branch hasn't also been searched.\n\n\
+Stage 5 concerns are: bug verifiably doesn't exist in {qsha}^,\n\
+non-created file/function missing from {qsha}^, or significant\n\
+divergence around the patched region. Do NOT use {qb} (the queue tip)\n\
+as the existence ref — it includes this commit and its successors.\n\n\
 Tools: git_show <ref>:<file>, git_diff <ref> <ref> -- <file>,\n\
 git_log <ref> --grep, search_file_content."
     )
