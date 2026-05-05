@@ -564,30 +564,54 @@ fn stage_instruction(stage: u8, input: &StageInput) -> String {
 fn stage_3(input: &StageInput) -> String {
     let tb = &input.target_branch;
     let qsha = &input.queue_sha;
+    let ver = &input.target_version;
     format!(
         "STAGE 3 — Dependency verification.\n\n\
 This is the most important load-bearing check. The reference for\n\
-\"reachable when this commit applies\" is {qsha}^ — the parent of the\n\
-queue commit, which represents the state of the tree right before\n\
-this cherry-pick lands. It includes everything in {tb} plus every\n\
-queued commit applied ahead of this one, but NOT this commit itself\n\
-or any later queue commits.\n\n\
+\"present in the tree when this commit applies\" is {qsha}^ — the\n\
+parent of the queue commit, which represents the tree state\n\
+immediately before this cherry-pick lands. It includes everything in\n\
+{tb} plus every queued commit ahead of this one. It does NOT include\n\
+this commit itself or any later queue commits.\n\n\
+HOW TO PROBE PRESENCE WITHOUT BROKEN ANCESTRY TESTS. Do NOT use\n\
+`git log A..B` to ask \"is A an ancestor of B\" — `A..B` returns\n\
+\"commits reachable from B not from A\", which is non-empty in BOTH\n\
+the ancestor and non-ancestor cases and is not a clean signal. Use\n\
+the patterns below instead, which read state directly and so cannot\n\
+be misinterpreted:\n\
+  - SUBJECT search:\n\
+      `git_log {qsha}^ --grep='<distinctive-keyword>' -n 5`\n\
+      → emits the commit if its subject contains the keyword AND it's\n\
+        in {qsha}^'s history. Empty result = not in this history\n\
+        (or no subject match — pick a subject keyword distinctive\n\
+        enough to avoid false misses).\n\
+  - SHA-string search (works when stable trees record the upstream\n\
+    SHA in their cherry-pick trailer):\n\
+      `git_log {qsha}^ --grep='<buggy-sha-prefix>' -n 5`\n\
+  - DIRECT FILE READ: read the file at {qsha}^ and inspect whether\n\
+    the relevant code is present:\n\
+      `git_show {qsha}^:<file_path>`\n\
+    This is the most reliable signal — you see the actual state.\n\n\
 3.1 FIXES: TARGETS. For every Fixes: trailer captured in stage 1:\n\
-    - Confirm the buggy commit resolves: `git_show <buggy_sha>` (with\n\
-      `suppress_diff:true` to keep the response small).\n\
-    - Confirm reachability from {qsha}^:\n\
-        `git_log --oneline <buggy_sha>..{qsha}^ -n 1`\n\
-      Any output means the buggy commit IS an ancestor (present when\n\
-      this patch lands). No output / error means it ISN'T.\n\
-    - Cross-check directly in the released tree:\n\
+    - Confirm the buggy commit exists at all: `git_show <buggy_sha>`\n\
+      with `suppress_diff:true` (keep the response small).\n\
+    - Determine whether it predates the {ver} branch point: read its\n\
+      committer date from `git_show`. If the date is BEFORE the {ver}\n\
+      branch was cut, the buggy commit is in {tb}. If it's AFTER, it\n\
+      can only reach {qsha}^ if someone backported it onto the queue.\n\
+    - Probe presence in {qsha}^ via SUBJECT search and/or by reading\n\
+      the file:\n\
+        `git_log {qsha}^ --grep='<buggy-subject-keyword>' -n 5`\n\
+        `git_show {qsha}^:<modified_file>` and look for the buggy code.\n\
+    - Cross-check in the released tree:\n\
         `git_log --oneline {tb} --grep='<buggy-subject-keyword>' -n 5`\n\
 3.2 CODE CONTEXT MATCHES IN THE TARGET TREE. For every file modified\n\
     in the diff, read it as it exists at {qsha}^ via\n\
     `git_show {qsha}^:<file_path>`. Compare the context lines around\n\
     each hunk to what's actually in {qsha}^. Even if the patch applies\n\
     cleanly, semantics may differ (reordered ops, refactored error\n\
-    paths, double-unlock from different cleanup structure). Concrete\n\
-    failure modes seen in real RC reviews:\n\
+    paths, double-unlock from different cleanup structure). Real\n\
+    failure modes from past RC reviews:\n\
       * disable_irq() reordered relative to netif_napi_del()\n\
       * unlock-on-error path that double-unlocks because the target\n\
         tree's error path already unlocks\n\
@@ -595,25 +619,27 @@ or any later queue commits.\n\n\
         is absent from this version, causing a crash\n\
 3.3 NEW SYMBOLS USED BY THE PATCH MUST EXIST AT {qsha}^. For each new\n\
     function call / macro / struct field / type the patch introduces,\n\
-    confirm it exists at {qsha}^:\n\
-      `search_file_content '<symbol>' {qsha}^`\n\
-      `git_show {qsha}^:<header>` for struct field checks.\n\
+    confirm it exists at {qsha}^ by READING the relevant file or\n\
+    grepping the tree:\n\
+      `git_show {qsha}^:<header>` (verify struct field is declared)\n\
+      `search_file_content '<symbol>'` (verify it's defined somewhere)\n\
     Real examples of missing-dependency failures: `.remove_new`\n\
-    callback added to platform_driver in v6.3 (absent in 5.10/5.15);\n\
+    callback on platform_driver (added in v6.3, absent in 5.10/5.15);\n\
     `struct devlink_fmsg.err` field absent in older kernels.\n\
-3.4 OTHER QUEUED PATCHES IN THE SAME AREA. Use lei_search and\n\
-    git_log on {qsha}^ -- <file> to find related queued or recently\n\
-    released patches. If this commit depends on another commit that\n\
-    is queued AFTER this one (i.e. NOT reachable from {qsha}^), that's\n\
-    an ordering bug — flag it.\n\
-3.5 PREREQUISITE COMMITS IN MAINLINE. If 3.2 or 3.3 found missing\n\
-    code, identify the upstream commit that introduced it. Then check\n\
-    whether that commit is queued anywhere in the {ver} queue (via\n\
-    lei_search 'Fixes:<prereq>' or by subject) — if not, this is a\n\
-    MISSING DEPENDENCY and a NO.\n\n\
+3.4 OTHER QUEUED PATCHES IN THE SAME AREA. Find related queued or\n\
+    recently released patches via `git_log {qsha}^ -- <file>` and\n\
+    `lei_search`. If this commit depends on another commit that is\n\
+    queued AFTER this one (i.e. its subject DOESN'T appear in any\n\
+    `git_log {qsha}^ --grep` result but DOES appear in the queue\n\
+    branch's overall log), that's an ordering bug — flag it.\n\
+3.5 PREREQUISITE COMMITS IN MAINLINE. If 3.2 or 3.3 found code that\n\
+    the patch needs but isn't present at {qsha}^, identify the\n\
+    upstream commit that introduced it. Then check whether THAT\n\
+    commit is queued anywhere in the {ver} queue (via lei_search\n\
+    'Fixes:<prereq>' or by subject). If not, this is a MISSING\n\
+    DEPENDENCY and a NO.\n\n\
 Tools: git_log, git_show, git_show <ref>:<path>, search_file_content,\n\
-lei_search.",
-        ver = input.target_version
+lei_search."
     )
 }
 
@@ -759,22 +785,35 @@ existence check below — NEVER use {qb} as the existence ref:\n\
   * `git_show {qsha}^:<path>` is the patch's pre-image — exactly what\n\
     git apply will see when the cherry-pick runs.\n\n\
 5.1 DOES THE BUG EXIST in the effective tree?\n\
-    - If a Fixes: trailer is present, look up the buggy commit:\n\
-        `git_log --oneline {qsha}^ --grep='<buggy-subject-keyword>' -n 5`\n\
-        `git_show <buggy_sha>` (sanity-check it exists at all).\n\
-      Then verify the buggy commit is REACHABLE from {qsha}^:\n\
-        `git_log --oneline <buggy_sha>..{qsha}^ -n 1`\n\
-        — if that emits ANY commit, the buggy commit is an ancestor of\n\
-          {qsha}^, i.e. present when this commit lands. If it errors\n\
-          or emits nothing, the buggy commit is NOT in the effective\n\
-          tree. Cross-check with `git_log --oneline {tb} --grep=...`.\n\
-      The bug exists if the buggy commit is in {tb} OR is reachable\n\
-      from {qsha}^ (queued ahead). If the buggy commit is in NEITHER\n\
-      — introduced after {ver} branched AND not queued ahead of this\n\
-      commit — the bug doesn't exist here. That's evidence for a NO.\n\
+    - If a Fixes: trailer is present:\n\
+        `git_show <buggy_sha>` with `suppress_diff:true` to confirm it\n\
+          exists at all and to read its date / subject.\n\
+      Probe presence in {qsha}^ — DIRECTLY, not via ancestry tests:\n\
+        `git_log {qsha}^ --grep='<buggy-subject-keyword>' -n 5`\n\
+          (subject search inside the effective tree's history)\n\
+        `git_log {qsha}^ --grep='<buggy-sha-prefix>' -n 5`\n\
+          (works when stable trees record the upstream SHA in their\n\
+           cherry-pick trailer)\n\
+        `git_show {qsha}^:<modified_file>` — read the file at the\n\
+          patch's pre-image and inspect whether the buggy code is\n\
+          present. This is the most reliable signal because it shows\n\
+          actual state, not history-walking heuristics.\n\
+      Cross-check in the released tree:\n\
+        `git_log --oneline {tb} --grep='<buggy-subject-keyword>' -n 5`\n\
+      Do NOT use `git log <buggy>..{qsha}^` or `{qsha}^..<buggy>` to\n\
+      decide ancestry — `git log A..B` returns commits reachable from\n\
+      B not from A, which is not a clean ancestor test (it's\n\
+      non-empty in both the ancestor and non-ancestor cases and you\n\
+      can't tell which from the output). Stick to subject/SHA grep\n\
+      and direct file reads.\n\
+      The bug exists when the buggy commit appears in a {qsha}^-scoped\n\
+      grep OR when reading {qsha}^:<file> reveals the buggy pattern\n\
+      in source. Only when neither holds — the buggy commit was\n\
+      introduced after {ver} branched AND isn't queued ahead — is\n\
+      this evidence for a NO.\n\
     - If no Fixes:: read the upstream pre-image and check whether the\n\
-      bad pattern is reproducible from {qsha}^. Stage 3.2 already did\n\
-      much of this; cross-reference its findings.\n\
+      bad pattern is reproducible from `git_show {qsha}^:<file>`.\n\
+      Stage 3.2 already did much of this; cross-reference its findings.\n\
 5.2 FILES AND FUNCTIONS EXIST in the effective tree:\n\
     - For every file in the diff: `git_show {qsha}^:<path>`.\n\
       Exception: if the diff itself CREATES the file (look at the diff\n\
