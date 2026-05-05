@@ -24,11 +24,17 @@ port = 119
 # dry_run = true
 
 [ai]
-provider = "gemini"
-model = "gemini-3.1-pro-preview"
-max_input_tokens = 900000
-max_interactions = 50
+provider = "script"
+model = "claude-via-shell"
+max_input_tokens = 180000
+max_interactions = 150
 temperature = 1.0
+
+# Original Gemini config (commented out while using the script provider):
+# provider = "gemini"
+# model = "gemini-3.1-pro-preview"
+# max_input_tokens = 900000
+# max_interactions = 50
 
 # To use Claude Code CLI (fixed-cost subscription, no API key needed):
 # provider = "claude-cli"
@@ -36,19 +42,11 @@ temperature = 1.0
 # max_input_tokens = 180000
 # max_interactions = 150
 
-# To delegate to a user-supplied wrapper script (e.g. ~/claude.sh, ~/cursor.sh).
-# The script is invoked as `command [args...] <prompt-file>` and must print
-# the model response to stdout. Quota / retry handling is the script's job.
-# provider = "script"
-# model = "claude-via-shell"           # cosmetic; surfaces in capabilities/logs
-#
-# [ai.script]
-# command = "/path/to/your-llm-wrapper.sh"
-# args = []                            # optional argv prepended before the prompt file
-# timeout_secs = 1800                  # optional; falls back to ai.api_timeout_secs
-# context_window_size = 200000         # used by token-budget heuristics
-# [ai.script.env]                      # optional env layered onto the inherited environment
-# SOMETHING = "value"
+# Delegate to ~/claude.sh; the script handles quota retries and HEAD rollback.
+[ai.script]
+command = "/home/sasha/claude.sh"
+timeout_secs = 1800
+context_window_size = 200000
 
 [ai.claude]
 prompt_caching = true
