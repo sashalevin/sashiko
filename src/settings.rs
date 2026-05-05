@@ -166,6 +166,29 @@ pub struct OpenAiCompatSettings {
 
 #[derive(Debug, Deserialize, Clone)]
 #[allow(unused)]
+pub struct ScriptSettings {
+    /// Path to the wrapper script. Invoked as `command [args...] <prompt-file>`.
+    pub command: String,
+    /// Optional argv prepended before the prompt-file path.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Per-call timeout in seconds. Falls back to `ai.api_timeout_secs` when unset.
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+    /// Extra environment variables layered onto the inherited environment.
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
+    /// Reported context window size for token-budget heuristics.
+    #[serde(default = "default_script_context_window")]
+    pub context_window_size: usize,
+}
+
+fn default_script_context_window() -> usize {
+    200_000
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[allow(unused)]
 pub struct AiSettings {
     pub provider: String,
     pub model: String,
@@ -189,6 +212,7 @@ pub struct AiSettings {
     #[cfg(feature = "bedrock")]
     pub bedrock: Option<BedrockSettings>,
     pub openai_compat: Option<OpenAiCompatSettings>,
+    pub script: Option<ScriptSettings>,
 }
 
 fn default_api_timeout_secs() -> u64 {

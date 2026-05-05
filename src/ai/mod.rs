@@ -277,6 +277,23 @@ pub fn create_provider(settings: &Settings) -> Result<Arc<dyn AiProvider>> {
         "codex-cli" => Ok(Arc::new(codex_cli::CodexCliProvider {
             model: settings.ai.model.clone(),
         })),
+        "script" => {
+            let cfg = settings.ai.script.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("[ai.script] section is required when ai.provider = \"script\"")
+            })?;
+            if cfg.command.trim().is_empty() {
+                bail!("[ai.script].command must be set to the path of a wrapper script");
+            }
+            let timeout_secs = cfg.timeout_secs.unwrap_or(settings.ai.api_timeout_secs);
+            Ok(Arc::new(script::ScriptProvider {
+                command: cfg.command.clone(),
+                args: cfg.args.clone(),
+                timeout_secs,
+                env: cfg.env.clone(),
+                model: settings.ai.model.clone(),
+                context_window_size: cfg.context_window_size,
+            }))
+        }
         p => bail!("Unsupported AI provider: {}", p),
     }
 }
@@ -289,6 +306,7 @@ pub mod gemini;
 pub mod openai;
 pub mod proxy;
 pub mod quota;
+pub mod script;
 pub mod token_budget;
 pub mod truncator;
 

@@ -36,6 +36,20 @@ temperature = 1.0
 # max_input_tokens = 180000
 # max_interactions = 150
 
+# To delegate to a user-supplied wrapper script (e.g. ~/claude.sh, ~/cursor.sh).
+# The script is invoked as `command [args...] <prompt-file>` and must print
+# the model response to stdout. Quota / retry handling is the script's job.
+# provider = "script"
+# model = "claude-via-shell"           # cosmetic; surfaces in capabilities/logs
+#
+# [ai.script]
+# command = "/path/to/your-llm-wrapper.sh"
+# args = []                            # optional argv prepended before the prompt file
+# timeout_secs = 1800                  # optional; falls back to ai.api_timeout_secs
+# context_window_size = 200000         # used by token-budget heuristics
+# [ai.script.env]                      # optional env layered onto the inherited environment
+# SOMETHING = "value"
+
 [ai.claude]
 prompt_caching = true
 
