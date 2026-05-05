@@ -461,7 +461,7 @@ fn trim_for_log(s: &str) -> String {
 // ---- Prompt construction ---------------------------------------------------
 
 fn build_system_prompt(stage: u8, input: &StageInput) -> String {
-    let stage_intro = stage_instruction(stage);
+    let stage_intro = stage_instruction(stage, input);
     format!(
         "{shared}\n\n{stage_intro}\n\n{output_contract}",
         shared = shared_system_prompt(input),
@@ -474,33 +474,68 @@ fn build_synthesis_system_prompt(input: &StageInput) -> String {
     format!(
         "{shared}\n\n{stage_intro}\n\n{output_contract}",
         shared = shared_system_prompt(input),
-        stage_intro = stage_instruction(7),
-        output_contract = SYNTHESIS_OUTPUT_CONTRACT,
+        stage_intro = stage_instruction(7, input),
+        output_contract = synthesis_output_contract(input),
     )
 }
 
 fn shared_system_prompt(input: &StageInput) -> String {
     let date = chrono::Utc::now().format("%A, %B %d, %Y");
     format!(
-        "You are a Linux kernel stable-tree maintainer reviewing a queued backport.\n\
+        "You are a Linux kernel stable-tree reviewer performing deep verification of\n\
+         a commit that has ALREADY BEEN SELECTED for backport to {target_branch}.\n\
          Today's date: {date}.\n\n\
-         Your job: decide whether the queued commit on `{queue_branch}` is a correct,\n\
-         safe, and shippable backport for the `{target_branch}` release. The original\n\
-         commit lives in mainline (`origin/master`) and was applied to this stable\n\
-         branch's queue. Your evaluation must be evidence-driven: every claim you\n\
-         make MUST be backed by a tool-derived observation (git_show, git_log,\n\
-         git_grep via search_file_content, lei_search, b4_dig, lore_thread, read_files).\n\
-         If you cannot verify a claim, raise a concern with low confidence rather\n\
-         than asserting it.\n\n\
+         The selection decision is already made. Your job is NOT to decide whether\n\
+         the commit *should* be backported per stable-process rules. Your job is to\n\
+         VERIFY that the selection is sound — that the commit, as it sits on\n\
+         `{queue_branch}`, will be CORRECT IN THE CONTEXT OF the target tree.\n\n\
+         Specifically check:\n\
+         1. ALL DEPENDENCIES ARE PRESENT — every commit this patch depends on is\n\
+            either already in {target_branch} (released) or also queued ahead of\n\
+            this commit on {queue_branch}. Missing dependencies cause build\n\
+            failures, incorrect behavior, or silent corruption on this tree.\n\
+         2. NO IMPORTANT FOLLOW-UP FIXES ARE MISSING — if mainline (origin/master)\n\
+            has commits with `Fixes: {upstream}` or that revert this commit, those\n\
+            follow-ups must also be queued. A backport that itself has known bugs\n\
+            is worse than no backport.\n\
+         3. THE CODE IT TOUCHES ACTUALLY EXISTS IN THIS TREE — functions, struct\n\
+            members, macros, config options, files, and surrounding context lines\n\
+            must match in the target tree. Even if the patch applies cleanly,\n\
+            semantic divergence (reordered ops, missing prerequisites, refactored\n\
+            error paths) can silently break behavior on this version.\n\
+         4. NO INAPPROPRIATE FEATURES OR REGRESSIONS — verify the commit doesn't\n\
+            sneak in new APIs, new config options, or changed behavior that breaks\n\
+            existing callers in this tree.\n\
+         5. THE BUG ACTUALLY EXISTS IN THIS VERSION — fixes for bugs introduced\n\
+            after the {version} branch point are unnecessary and add risk for no\n\
+            benefit.\n\n\
+         IMPORTANT: \"this is a cleanup, not a user-visible bug fix\" or \"there's\n\
+         no Cc: stable\" are NOT problems. Cleanups, code-quality changes, and\n\
+         dead-code removals routinely ship in stable. What matters is whether the\n\
+         commit applies CORRECTLY in this tree's context. Eligibility per\n\
+         stable-kernel-rules.rst is upstream-process; by the time this patch is on\n\
+         {queue_branch} someone has already decided.\n\n\
+         Every factual claim must be verified against actual code, git history,\n\
+         or mailing-list discussions via the available tools (git_show, git_log,\n\
+         search_file_content, lei_search, b4_dig, lore_thread, read_files). If\n\
+         you cannot verify a claim, mark it UNVERIFIED — do NOT let unverified\n\
+         claims drive the verdict.\n\n\
          TARGET VERSION: {version}\n\
-         TARGET BRANCH:  {target_branch}\n\
-         QUEUE BRANCH:   {queue_branch}\n\
+         TARGET BRANCH:  {target_branch}   (last released)\n\
+         QUEUE BRANCH:   {queue_branch}    (this commit + its peers, queued for next release)\n\
          QUEUE SHA:      {queue_sha}\n\
-         UPSTREAM SHA:   {upstream}\n\n\
-         GUIDANCE: batch independent tool calls in a single response (e.g. multiple\n\
-         git_log queries, or several lei_search queries) so this conversation does\n\
-         not blow turns on serial round-trips. lei_search ALWAYS runs with --no-save,\n\
-         so feel free to issue speculative queries.",
+         UPSTREAM SHA:   {upstream}        (original commit on origin/master)\n\n\
+         CRITICAL git rules:\n\
+         - NEVER use `git log --all` or any --all flag — it scans hundreds of\n\
+           branches and takes hours. Use specific refs (`origin/master`,\n\
+           `{target_branch}`, `{queue_branch}`).\n\
+         - NEVER run `git log` without a path limiter (`-- <file>`), an explicit\n\
+           ref range, a `--grep`, or `-n <count>`. The kernel has millions of\n\
+           commits.\n\n\
+         GUIDANCE: batch independent tool calls in a single response (multiple\n\
+         git_log queries, several lei_search queries) so this conversation does\n\
+         not burn turns on serial round-trips. lei_search ALWAYS runs with\n\
+         --no-save, so speculative queries are free.",
         date = date,
         version = input.target_version,
         target_branch = input.target_branch,
@@ -513,16 +548,16 @@ fn shared_system_prompt(input: &StageInput) -> String {
     )
 }
 
-fn stage_instruction(stage: u8) -> &'static str {
+fn stage_instruction(stage: u8, input: &StageInput) -> String {
     match stage {
-        1 => STAGE_1,
-        2 => STAGE_2,
-        3 => STAGE_3,
-        4 => STAGE_4,
-        5 => STAGE_5,
-        6 => STAGE_6,
-        7 => STAGE_7,
-        _ => "",
+        1 => STAGE_1.to_string(),
+        2 => STAGE_2.to_string(),
+        3 => STAGE_3.to_string(),
+        4 => STAGE_4.to_string(),
+        5 => stage_5(input),
+        6 => stage_6(input),
+        7 => stage_7(input),
+        _ => String::new(),
     }
 }
 
@@ -531,44 +566,98 @@ JSON object only, no markdown fences, no surrounding prose:\n\
 {\n  \"concerns\": [\n    { \"kind\": \"<short snake_case category>\",\n      \"severity\": \"low|medium|high|critical\",\n      \"problem\": \"<one-line description>\",\n      \"evidence\": \"<tool output excerpt or git ref proving the concern>\" },\n    ...\n  ],\n  \"stage_summary\": \"<one paragraph: what you checked, what you found, what you couldn't verify>\"\n}\n\
 If there are no concerns, emit `\"concerns\": []` and still write a stage_summary.";
 
-const SYNTHESIS_OUTPUT_CONTRACT: &str = "OUTPUT FORMAT: respond with a SINGLE JSON object only, no markdown fences:\n\
-{\n  \"verdict\": \"yes\" | \"no\" | \"needs_review\",\n  \"confidence\": <float 0.0-1.0>,\n  \"summary\": \"<one paragraph rationale>\",\n  \"concerns\": [ { \"kind\": \"...\", \"severity\": \"...\", \"problem\": \"...\", \"evidence\": \"...\" }, ... ]\n}\n\n\
-VERDICT POLICY (be conservative — when in doubt, prefer needs_review):\n\
-- \"yes\": evidence is strong that the backport is correct, applicable, and ships safely.\n\
-  All Fixes: prerequisites are satisfied (in target tree or queued). No follow-up\n\
-  fixes for this commit exist in mainline that aren't also queued. No reverts.\n\
-  The bug exists in the target version and the fix matches the upstream code path\n\
-  closely enough that no semantic divergence is suspected.\n\
-- \"no\": there is concrete evidence the backport is wrong, dangerous, or not applicable.\n\
-  Examples: the upstream commit was reverted; an indispensable Fixes: prerequisite\n\
-  is missing from the target tree; the bug doesn't exist in this version; the\n\
-  cherry-pick has known follow-up fixes that aren't queued.\n\
-- \"needs_review\": the evidence is mixed, missing, or uncertain. Use this whenever\n\
-  you couldn't reliably establish applicability or follow-up coverage.";
+fn synthesis_output_contract(input: &StageInput) -> String {
+    let tb = &input.target_branch;
+    let qb = &input.queue_branch;
+    let ver = &input.target_version;
+    format!(
+        "OUTPUT FORMAT: respond with a SINGLE JSON object only, no markdown fences:\n\
+{{\n  \"verdict\": \"yes\" | \"no\" | \"needs_review\",\n  \"confidence\": <float 0.0-1.0>,\n  \"summary\": \"<one paragraph rationale, naming specific evidence>\",\n  \"concerns\": [ {{ \"kind\": \"...\", \"severity\": \"...\", \"problem\": \"...\", \"evidence\": \"...\" }}, ... ]\n}}\n\n\
+VERDICT POLICY (the question is correctness IN THIS TREE, not stable-process eligibility):\n\
+- \"yes\": ALL of the following hold:\n\
+  * The bug exists in the target tree (or this is a device-ID / quirk / build-only fix).\n\
+  * All dependencies are present (already released in {tb} or queued ahead on {qb}).\n\
+  * No critical follow-up fixes for the upstream commit are missing.\n\
+  * The code being patched exists and surrounding context matches in {tb}.\n\
+  * No inappropriate features or behavioral changes for a stable tree.\n\
+  * Regression risk on this tree's callers is acceptable.\n\
+- \"no\": there is a SPECIFIC defect. Be concrete — name the defect:\n\
+  * Missing prerequisite commit X (give SHA + subject) absent from {tb} and {qb},\n\
+    blocking apply or causing semantic mismatch.\n\
+  * The buggy commit X (Fixes: target) was introduced AFTER the {ver} branch point,\n\
+    so the bug doesn't exist here and the fix is unnecessary.\n\
+  * Important follow-up fix Y (give SHA + subject) is in mainline but not queued.\n\
+  * The upstream commit was reverted in mainline.\n\
+  * File or function the patch touches doesn't exist in {tb}.\n\
+  * Concrete regression risk on a named caller / file in this tree.\n\
+  * Adds a new feature / API / config option inappropriate for stable.\n\
+- \"needs_review\": load-bearing evidence couldn't be obtained (e.g. lei is unavailable,\n\
+  a required ref isn't fetched, an ambiguous symbol couldn't be located). Use this\n\
+  when a check failed silently rather than confirming presence.\n\n\
+NOT grounds for \"no\" (these are upstream-process concerns, not our job):\n\
+- \"This is a cleanup / not a user-visible bug fix\" — cleanups ship in stable.\n\
+- \"No Cc: stable@vger.kernel.org\" — somebody already queued it; nomination path\n\
+  is irrelevant here.\n\
+- \"The author said this is mainline-only\" — selection has been made by a maintainer.\n\
+- \"There's no Fixes: trailer\" — this is informational, not disqualifying.\n\n\
+Be conservative — when in doubt about a SPECIFIC defect's existence, prefer\n\
+needs_review over no. But do not return needs_review when the evidence is clear."
+    )
+}
 
-const STAGE_1: &str = "STAGE 1 — Commit message + trailers.\n\n\
-Read the queue commit's message. Extract every trailer: Fixes:, Reported-by:,\n\
-Tested-by:, Reviewed-by:, Acked-by:, Link:, Cc: stable@vger.kernel.org,\n\
-Signed-off-by:. If the canonical `(cherry picked from commit <sha>)` trailer\n\
-is present, note the upstream SHA. If it is ABSENT (common on raw queue\n\
-patches that haven't been picked yet), use the Link: trailer's message-id\n\
-with `b4_dig` and/or `lei_search` to recover the upstream commit reference.\n\
-This stage's concerns should flag missing/inconsistent trailers, missing\n\
-Cc: stable when the patch is fix-shaped, unverifiable Link:, or claims in\n\
-the commit message that contradict the diff (do a quick sanity read).\n\n\
-Tools you'll use most: git_show, git_log, b4_dig, lei_search.";
+const STAGE_1: &str = "STAGE 1 — Commit message and trailer inventory.\n\n\
+Goal: extract the evidence later stages need, NOT to judge eligibility.\n\n\
+1.1 SUBJECT: extract subsystem prefix (e.g. \"net: tcp:\", \"drm/i915:\",\n\
+    \"mm/slub:\") and one-line summary of what the commit claims to do.\n\
+1.2 TRAILERS: record every trailer with its value. Critically:\n\
+    a) Fixes: <sha> — the upstream commit that introduced the bug. This is\n\
+       LOAD-BEARING for stage 3 dependency verification.\n\
+    b) Link: — pointers to lore discussion, syzbot reports, bug trackers.\n\
+       Used in stages 1 and 4 if you need to recover upstream SHA or look\n\
+       up follow-up discussion.\n\
+    c) Reported-by:, Tested-by:, Reviewed-by:, Acked-by: — quality signals.\n\
+    d) `(cherry picked from commit <sha>)` — if present, this is the\n\
+       upstream SHA. If absent (common on commits queued as raw patches),\n\
+       use `b4_dig -c` on Link: trailers or `lei_search 's:\"<subject>\"'`\n\
+       to recover the upstream commit reference.\n\
+1.3 BODY: identify the bug described, its symptom, root cause as the author\n\
+    states it. Note any references to other commits or kernel versions.\n\
+1.4 HIDDEN BUG FIXES: a commit framed as \"clean up\" or \"refactor\" can be a\n\
+    real bug fix. Look for telltales: \"Handle X properly\", \"Initialize X\",\n\
+    \"Balance refcount\", \"Improve locking\". Note the actual mechanism.\n\n\
+DO NOT flag concerns based on missing Cc: stable, missing Fixes:, or\n\
+\"this seems like a cleanup, not stable-eligible\". The selection has been\n\
+made; eligibility is not your concern. Stage 1 concerns are limited to:\n\
+- the commit message materially contradicts the diff (e.g. claims to fix X\n\
+  but the diff doesn't touch X)\n\
+- the upstream SHA cannot be recovered after exhausting the available tools\n\
+  (this becomes a blocker for stage 3 deps and stage 4 follow-ups; flag it\n\
+  here so the synthesis stage can mark needs_review).\n\n\
+Tools: git_show, git_log, b4_dig, lei_search, lore_thread.";
 
-const STAGE_2: &str = "STAGE 2 — Diff inventory and bug classification.\n\n\
-Read the queue diff. Inventory the files and functions modified. Classify\n\
-the change into one or more bug classes — race, leak, UAF, init-order,\n\
-refcount, locking, lock-ordering, hardware/dma, build, sparse, security,\n\
-revert, cleanup, feature/non-fix. Note the scope: surgical hunk vs. broad\n\
-refactor. Concerns this stage produces: scope mismatch (e.g. a 'fix' that\n\
-also adds new APIs), bug class incompatible with stable-tree rules\n\
-(stable doesn't want feature work), or files modified that don't exist\n\
-in the target version.\n\n\
+const STAGE_2: &str = "STAGE 2 — Diff analysis (what does this commit do, in detail).\n\n\
+Goal: understand the change well enough that stages 3, 5, and 6 can verify\n\
+it against the target tree. NOT bug-class taxonomy — concrete mechanism.\n\n\
+2.1 INVENTORY: list every file modified with +/- counts; identify each\n\
+    function modified (read @@ hunk headers). Classify scope: single-file\n\
+    surgical / multi-file / cross-subsystem.\n\
+2.2 PER-HUNK CODE FLOW: for each hunk, what was the code doing BEFORE,\n\
+    what does it do AFTER, and is this the normal path / error path /\n\
+    init path? Note any new function calls, new struct field accesses,\n\
+    new macros — these are the candidates stages 3 and 5 must verify\n\
+    exist in the target tree.\n\
+2.3 BUG MECHANISM: classify what the fix actually does (error-path leak,\n\
+    race, refcount, NULL/bounds check, initialization, off-by-one, hardware\n\
+    quirk). Stages 3-6 use this to know what to look for.\n\
+2.4 NEW SYMBOLS: list every function call, macro, struct field, or type\n\
+    introduced by the patch that the surrounding (unchanged) target-tree\n\
+    code wouldn't already have. Stage 3 will check whether each exists.\n\n\
+Stage 2 concerns should be specific defects in the patch ITSELF (a hunk\n\
+that obviously doesn't compile, a function call to a symbol the diff also\n\
+removes, an unrelated change snuck into a fix). Bug-class taxonomy is NOT\n\
+a concern — it's information for downstream stages.\n\n\
 Tools: git_show -p (queue diff), git_show on the upstream SHA for the\n\
-upstream diff, list_dir / find_files for target-tree existence checks.";
+upstream diff comparison.";
 
 const STAGE_3: &str = "STAGE 3 — Dependency verification.\n\n\
 This is the most important load-bearing check. For every Fixes: trailer\n\
@@ -602,47 +691,120 @@ regressions or follow-up postings that aren't yet committed. Pull the\n\
 thread with `lore_thread <mid>` if a hit looks load-bearing.\n\n\
 Tools: git_log --grep, lei_search, b4_dig, lore_thread.";
 
-const STAGE_5: &str = "STAGE 5 — Version applicability.\n\n\
-Confirm the bug being fixed actually exists in the target stable\n\
-branch. Read the upstream commit's diff to identify the buggy\n\
-pre-image — then `git_show stable-rc/linux-<ver>.y:<path>` to read\n\
-the target file at the same line range and verify the bug is present.\n\
-If the buggy code doesn't exist in the target version (e.g. the function\n\
-was rewritten between target and mainline), the backport is not\n\
-applicable.\n\n\
-Assess code divergence: `git_diff stable-rc/linux-<ver>.y origin/master\n\
--- <path>` to see how much the file has drifted. Heavy divergence around\n\
-the modified hunks raises the chance of a silent semantic mismatch when\n\
-the queue patch is applied — even when it applies textually.\n\n\
-Tools: git_show <ref>:<file>, git_diff <ref> <ref> -- <file>, git_log <ref> -- <file>.";
+fn stage_5(input: &StageInput) -> String {
+    let tb = &input.target_branch;
+    let qb = &input.queue_branch;
+    let ver = &input.target_version;
+    format!(
+        "STAGE 5 — Version applicability (does the bug exist in THIS tree).\n\n\
+Goal: confirm the conditions for this backport to be meaningful actually\n\
+hold in the target tree. If the bug doesn't exist here, the patch is\n\
+unnecessary and adds risk for no benefit.\n\n\
+CRITICAL: when this commit lands, the *effective* target tree is\n\
+{qb} (everything released in {tb} PLUS everything queued ahead of\n\
+this commit on {qb}). A Fixes: target or prerequisite that is queued\n\
+ahead of this commit IS effectively present once the queue ships. Do\n\
+NOT mark the bug as 'not present' merely because the buggy commit is\n\
+absent from {tb} — also check {qb}. The queue branch contains both\n\
+the released history AND the new patches.\n\n\
+5.1 DOES THE BUG EXIST in the effective target tree?\n\
+    - If a Fixes: trailer is present, look up the buggy commit in BOTH\n\
+      refs:\n\
+        `git_log --oneline {tb} --grep='<buggy-subject-keyword>' -n 5`\n\
+        `git_log --oneline {qb} --grep='<buggy-subject-keyword>' -n 5`\n\
+      Or directly: `git_show <buggy_sha>` to confirm it resolves at all\n\
+      (a successful resolve from the local repo means it's reachable\n\
+      from at least one of the fetched refs). If the buggy commit is in\n\
+      {tb} OR queued ahead of this commit on {qb}, the bug exists and\n\
+      the fix is meaningful. Only when the buggy commit is in NEITHER\n\
+      (introduced after the {ver} branch point AND not queued for\n\
+      {ver}) does this become evidence for a NO.\n\
+    - If no Fixes:: read the upstream pre-image and check whether the\n\
+      bad pattern is reproducible in the target tree (try both {tb} and\n\
+      {qb} ref-scoped reads if they differ in the relevant region).\n\
+      Stage 3.2 already did much of this; cross-reference its findings.\n\
+5.2 FILES AND FUNCTIONS EXIST in the effective target tree:\n\
+    - For every file in the diff: try `git_show {tb}:<path>` first; if\n\
+      404, try `git_show {qb}:<path>` (the file may have been added by\n\
+      a queued commit ahead of this one). Only when BOTH fail is this a\n\
+      hard NO — the patch can't apply.\n\
+    - For every modified function: confirm it exists with the expected\n\
+      signature in {tb} or {qb} via `search_file_content` or\n\
+      `git_show <ref>:<path>`.\n\
+5.3 DIVERGENCE ASSESSMENT:\n\
+    - `git_diff {tb} origin/master -- <path>` (use head/wc to gauge\n\
+      magnitude without dumping huge diffs).\n\
+    - Significant divergence around the modified hunks raises the chance\n\
+      of silent semantic mismatch even when the patch applies textually.\n\
+      Note the level (minimal / moderate / significant) and call out any\n\
+      hunks where divergence overlaps the patch's change region.\n\n\
+Stage 5 concerns are: bug verifiably doesn't exist in {tb} OR {qb},\n\
+file/function missing from BOTH {tb} and {qb}, or significant\n\
+divergence around the patched region. Do NOT raise concerns based on\n\
+{tb}-only checks when the queue branch hasn't also been searched.\n\n\
+Tools: git_show <ref>:<file>, git_diff <ref> <ref> -- <file>,\n\
+git_log <ref> --grep, search_file_content."
+    )
+}
 
-const STAGE_6: &str = "STAGE 6 — Regression risk on the target branch.\n\n\
-With everything above in mind, assess what could break if this backport\n\
-ships on the target stable branch. Look for:\n\n\
-- Locking / concurrency divergence: does the lock acquired in the\n\
-  upstream patch exist in the target tree? Same lock type? Same order?\n\
-- Resource-management regressions: the patch adds an alloc/free pair\n\
-  that pairs differently in the target tree (e.g. cleanup paths refactored).\n\
-- Security regressions: the patch fixes a security issue but the bounds\n\
-  check it adds is wrong for the older API.\n\
-- Caller fanout: search the target tree for callers of any function\n\
-  signature/contract changed by this patch (`search_file_content` for\n\
-  the function name) and verify all callers are consistent.\n\n\
-Concerns from this stage are 'this might break <X> on <ver>' style.\n\
-Cite which caller / which file / which line.\n\n\
-Tools: read_files, git_blame, search_file_content, git_log.";
+fn stage_6(input: &StageInput) -> String {
+    let tb = &input.target_branch;
+    format!(
+        "STAGE 6 — Feature creep and regression risk on THIS tree.\n\n\
+Goal: even if the patch applies cleanly and the bug is present, does it\n\
+introduce things stable shouldn't carry, or change behavior in a way that\n\
+would break callers in {tb} specifically?\n\n\
+6.1 NEW FEATURES introduced by this commit:\n\
+    - New userspace APIs, syscalls, ioctls, sysfs/procfs entries, module\n\
+      params, CONFIG_* options, new hardware support beyond device-IDs.\n\
+    - These are stable-inappropriate and become a NO if found.\n\
+6.2 BEHAVIORAL CHANGES beyond the bug fix proper:\n\
+    - Changed return values in non-error cases.\n\
+    - Modified semantics of existing interfaces.\n\
+    - Changed default behavior visible to callers.\n\
+6.3 REGRESSION RISK ON {tb} CALLERS:\n\
+    - Caller fanout: `search_file_content '<changed-fn>(' {tb}`\n\
+      to enumerate every caller in the target tree, then verify the\n\
+      caller's expectations still match the patched callee. This is\n\
+      where most subtle stable regressions hide.\n\
+    - Locking divergence: does a new lock acquisition in the patch\n\
+      interact with locks already held elsewhere in {tb} that were\n\
+      refactored away in mainline?\n\
+    - Cleanup-path symmetry: does an alloc/free pair the patch adds\n\
+      survive {tb}'s error-path structure (which may differ from\n\
+      mainline's)?\n\
+    - Timing changes that could expose latent races present in {tb}\n\
+      but not mainline.\n\
+6.4 SCOPE PROPORTIONALITY: a 5-line fix for a crash is proportional; a\n\
+    200-line refactor for a cosmetic issue is suspicious.\n\n\
+Stage 6 concerns must NAME the specific caller / file / line / lock at\n\
+risk. Generic \"this might cause issues\" is not actionable. NEW FEATURE\n\
+INTRODUCTION is the one exception where the concern itself is the\n\
+defect — name what feature was added.\n\n\
+Tools: read_files, git_blame, search_file_content, git_log."
+    )
+}
 
-const STAGE_7: &str = "STAGE 7 — Synthesis and verdict.\n\n\
-You are given the union of concerns from stages 1-6. Deduplicate\n\
-overlapping concerns. Discard any concern that turned out to be a false\n\
-positive based on later-stage evidence. Then emit a single verdict:\n\n\
-- yes: ship this backport as-is.\n\
-- no: do NOT ship; provide the load-bearing reason in summary.\n\
-- needs_review: human attention required (mixed evidence, lookups\n\
-  failed, or the model is uncertain).\n\n\
-Be conservative. The cost of a wrong 'yes' (shipping a broken backport\n\
-to millions of users) is much higher than the cost of a wrong\n\
-'needs_review' (a maintainer spends 10 minutes double-checking).";
+fn stage_7(input: &StageInput) -> String {
+    let tb = &input.target_branch;
+    format!(
+        "STAGE 7 — Synthesis: is the selection sound?\n\n\
+You have findings from stages 1-6. The question is NOT whether this\n\
+commit should have been selected for backport. The question is whether\n\
+the selection — already made — is sound for {tb}.\n\n\
+7.1 COMPILE EVIDENCE\n\
+    - Evidence the selection IS sound (positive findings from 1-6).\n\
+    - Evidence of SPECIFIC defects (missing prereq SHA, missing follow-up\n\
+      SHA, missing file/function, named caller regression, feature creep,\n\
+      bug not in target version, upstream revert).\n\
+    - Unverified claims (lookups that failed, ambiguous evidence).\n\n\
+7.2 DEDUPLICATE concerns from 1-6 — multiple stages may have reported the\n\
+    same defect. Discard concerns that later-stage evidence refuted.\n\n\
+7.3 EMIT VERDICT per the verdict policy. Be specific: a 'no' must name\n\
+    the exact defect (which SHA is missing, which function doesn't exist,\n\
+    which caller breaks). Vague 'might have problems' is a 'needs_review'."
+    )
+}
 
 fn build_stage_user_prompt(stage: u8, input: &StageInput, prior: &[StageRecord]) -> String {
     let prior_summary = if prior.is_empty() {
@@ -822,7 +984,64 @@ mod tests {
 
     #[test]
     fn shared_system_prompt_mentions_no_save() {
-        let input = StageInput {
+        let input = sample_input();
+        let s = shared_system_prompt(&input);
+        assert!(
+            s.contains("--no-save"),
+            "system prompt must mention --no-save"
+        );
+        assert!(s.contains("6.12"));
+    }
+
+    /// All stage prompts and the synthesis output contract must finish
+    /// substitution before reaching the model. A leftover `{x}` would
+    /// drive the model to copy the placeholder verbatim into tool calls
+    /// and produce nonsense reviews — Codex caught this once already.
+    #[test]
+    fn stage_prompts_have_no_unsubstituted_placeholders() {
+        let input = sample_input();
+        for stage in 1u8..=7 {
+            let sys = build_system_prompt(stage, &input);
+            assert!(
+                !contains_unsubstituted_template(&sys),
+                "stage {stage} system prompt has an unsubstituted {{...}} placeholder:\n{sys}"
+            );
+        }
+        let synth = build_synthesis_system_prompt(&input);
+        assert!(
+            !contains_unsubstituted_template(&synth),
+            "synthesis system prompt has an unsubstituted {{...}} placeholder:\n{synth}"
+        );
+    }
+
+    /// True if `s` contains a `{ident}` placeholder that looks like a
+    /// Rust format spec rather than the prose use of literal braces (we
+    /// don't write braces in stage prose otherwise).
+    fn contains_unsubstituted_template(s: &str) -> bool {
+        let mut chars = s.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c != '{' {
+                continue;
+            }
+            // collect run of letters/underscores
+            let mut name = String::new();
+            while let Some(&n) = chars.peek() {
+                if n.is_ascii_alphanumeric() || n == '_' {
+                    name.push(n);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            if !name.is_empty() && chars.peek() == Some(&'}') {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn sample_input() -> StageInput {
+        StageInput {
             queue_sha: "a".repeat(40),
             queue_branch: "stable-rc/queue/6.12".into(),
             queue_subject: "subj".into(),
@@ -833,12 +1052,6 @@ mod tests {
             upstream_diff: None,
             target_version: "6.12".into(),
             target_branch: "linux-6.12.y".into(),
-        };
-        let s = shared_system_prompt(&input);
-        assert!(
-            s.contains("--no-save"),
-            "system prompt must mention --no-save"
-        );
-        assert!(s.contains("6.12"));
+        }
     }
 }

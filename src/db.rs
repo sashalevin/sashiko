@@ -1144,7 +1144,7 @@ impl Database {
         while let Ok(Some(row)) = rows.next().await {
             out.push(row.get(0)?);
         }
-        out.sort_by(|a, b| version_key(b).cmp(&version_key(a)));
+        out.sort_by_key(|v| std::cmp::Reverse(version_key(v)));
         Ok(out)
     }
 
