@@ -265,6 +265,8 @@ pub async fn run_server(
         .route("/api/stats/timeline", get(stats_timeline))
         .route("/api/stats/reviews", get(stats_reviews))
         .route("/api/stats/tools", get(stats_tools))
+        .route("/api/backports", get(list_backports))
+        .route("/api/backport", get(get_backport))
         .route("/api/submit", post(submit_patch))
         .route("/api/patchset/rerun", post(rerun_patchset))
         .route("/api/patch/rerun", post(rerun_patch))
@@ -668,6 +670,151 @@ async fn get_patchset(
         }
         Err(e) => {
             info!("Database error: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct BackportListQuery {
+    page: Option<u32>,
+    per_page: Option<u32>,
+    /// Substring search across subject and upstream_sha.
+    q: Option<String>,
+    /// Restrict to a single target version (e.g. "6.12").
+    version: Option<String>,
+    /// Restrict to a verdict (yes / no / needs_review).
+    verdict: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct BackportCell {
+    id: i64,
+    version: String,
+    target_branch: String,
+    queue_sha: String,
+    verdict: Option<String>,
+    confidence: Option<f64>,
+    summary: Option<String>,
+    status: String,
+    completed_at: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+struct BackportGroup {
+    upstream_sha: String,
+    subject: String,
+    /// One cell per target_version reviewed for this upstream commit.
+    cells: Vec<BackportCell>,
+    /// Convenience: most-recent activity across all cells for sorting on the client.
+    last_seen: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct BackportListResponse {
+    groups: Vec<BackportGroup>,
+    /// All distinct target_versions present in the *unfiltered* table —
+    /// the dashboard uses this to render the matrix's column header.
+    versions: Vec<String>,
+    page: u32,
+    per_page: u32,
+    total_groups: i64,
+}
+
+async fn list_backports(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<BackportListQuery>,
+) -> Result<Json<BackportListResponse>, StatusCode> {
+    let page = q.page.unwrap_or(1).max(1);
+    let per_page = q.per_page.unwrap_or(50).clamp(1, 200);
+    let offset = ((page - 1) * per_page) as i64;
+
+    let (rows, total_groups) = state
+        .db
+        .list_backport_reviews(
+            q.q.as_deref(),
+            q.version.as_deref(),
+            q.verdict.as_deref(),
+            offset,
+            per_page as i64,
+        )
+        .await
+        .map_err(|e| {
+            error!("list_backport_reviews failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    // Distinct versions (unfiltered) for the matrix header.
+    let versions = state
+        .db
+        .distinct_backport_versions()
+        .await
+        .unwrap_or_default();
+
+    // Fold rows into groups in stable iteration order.
+    let mut groups: Vec<BackportGroup> = Vec::new();
+    let mut current: Option<BackportGroup> = None;
+    for r in rows {
+        if current
+            .as_ref()
+            .is_none_or(|g| g.upstream_sha != r.upstream_sha)
+        {
+            if let Some(g) = current.take() {
+                groups.push(g);
+            }
+            current = Some(BackportGroup {
+                upstream_sha: r.upstream_sha.clone(),
+                subject: r.subject.clone(),
+                cells: Vec::new(),
+                last_seen: r.completed_at.unwrap_or(r.created_at),
+            });
+        }
+        if let Some(g) = current.as_mut() {
+            let ts = r.completed_at.unwrap_or(r.created_at);
+            if ts > g.last_seen {
+                g.last_seen = ts;
+            }
+            g.cells.push(BackportCell {
+                id: r.id,
+                version: r.target_version,
+                target_branch: r.target_branch,
+                queue_sha: r.queue_sha,
+                verdict: r.verdict,
+                confidence: r.confidence,
+                summary: r.summary,
+                status: r.status,
+                completed_at: r.completed_at,
+            });
+        }
+    }
+    if let Some(g) = current.take() {
+        groups.push(g);
+    }
+    groups.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
+
+    Ok(Json(BackportListResponse {
+        groups,
+        versions,
+        page,
+        per_page,
+        total_groups,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct BackportDetailQuery {
+    id: i64,
+}
+
+async fn get_backport(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<BackportDetailQuery>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    match state.db.get_backport_review(q.id).await {
+        Ok(Some(detail)) => Ok(Json(serde_json::to_value(detail).unwrap_or_default())),
+        Ok(None) => Err(StatusCode::NOT_FOUND),
+        Err(e) => {
+            error!("get_backport_review failed: {e}");
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }

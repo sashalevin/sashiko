@@ -79,6 +79,62 @@ pub struct CachedBackportReview {
     pub summary: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackportRow {
+    pub id: i64,
+    pub upstream_sha: String,
+    pub queue_sha: String,
+    pub target_version: String,
+    pub target_branch: String,
+    pub subject: String,
+    pub verdict: Option<String>,
+    pub confidence: Option<f64>,
+    pub summary: Option<String>,
+    pub status: String,
+    pub created_at: i64,
+    pub completed_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackportRowDetail {
+    pub id: i64,
+    pub upstream_sha: String,
+    pub queue_sha: String,
+    pub target_version: String,
+    pub target_branch: String,
+    pub subject: String,
+    pub verdict: Option<String>,
+    pub confidence: Option<f64>,
+    pub summary: Option<String>,
+    pub status: String,
+    pub model_name: Option<String>,
+    pub provider: Option<String>,
+    pub tokens_in: Option<i64>,
+    pub tokens_out: Option<i64>,
+    pub tokens_cached: Option<i64>,
+    pub logs: Option<String>,
+    pub failed_reason: Option<String>,
+    pub created_at: i64,
+    pub completed_at: Option<i64>,
+    pub findings: Vec<BackportFindingRow>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackportFindingRow {
+    pub severity: i32,
+    pub severity_explanation: Option<String>,
+    pub problem: String,
+}
+
+/// Sort key for kernel version strings: "6.12" -> [6, 12]. Two-element
+/// vec is enough for x.y.z too — z is parsed but typically absent on
+/// stable major.minor designators.
+fn version_key(s: &str) -> Vec<u32> {
+    s.split('.')
+        .map(|part| part.parse::<u32>().unwrap_or(0))
+        .collect()
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct MessageRow {
     pub id: i64,
@@ -892,6 +948,206 @@ impl Database {
             )
             .await?;
         Ok(())
+    }
+
+    /// Dashboard query: all backport reviews grouped by upstream_sha,
+    /// ordered by latest activity. The result is a flat row list — the
+    /// caller (`api.rs`) folds it into a matrix. Optional filters by
+    /// substring of subject/SHA, exact target_version, or verdict.
+    pub async fn list_backport_reviews(
+        &self,
+        q: Option<&str>,
+        version: Option<&str>,
+        verdict: Option<&str>,
+        offset_groups: i64,
+        limit_groups: i64,
+    ) -> Result<(Vec<BackportRow>, i64)> {
+        // Inner query selects matching upstream_sha values with their
+        // latest activity timestamp; outer query joins back the per-row
+        // detail. SQLite supports both.
+        let mut filters: Vec<String> = Vec::new();
+        let mut binds: Vec<libsql::Value> = Vec::new();
+
+        if let Some(q) = q
+            && !q.trim().is_empty()
+        {
+            filters.push("(subject LIKE ? OR upstream_sha LIKE ?)".to_string());
+            let like = format!("%{}%", q.trim());
+            binds.push(like.clone().into());
+            binds.push(like.into());
+        }
+        if let Some(v) = version
+            && !v.trim().is_empty()
+        {
+            filters.push("target_version = ?".to_string());
+            binds.push(v.to_string().into());
+        }
+        if let Some(v) = verdict
+            && !v.trim().is_empty()
+        {
+            filters.push("verdict = ?".to_string());
+            binds.push(v.to_string().into());
+        }
+        let where_clause = if filters.is_empty() {
+            String::new()
+        } else {
+            format!(" WHERE {}", filters.join(" AND "))
+        };
+
+        // Total distinct upstream_sha matching filters
+        let count_sql = format!(
+            "SELECT COUNT(DISTINCT upstream_sha) FROM backport_reviews{}",
+            where_clause
+        );
+        let mut rows = self.conn.query(&count_sql, binds.clone()).await?;
+        let total_groups: i64 = rows
+            .next()
+            .await
+            .ok()
+            .flatten()
+            .map(|r| r.get(0).unwrap_or(0))
+            .unwrap_or(0);
+
+        // Pick the `limit_groups` upstream_shas with the most-recent activity.
+        let group_sql = format!(
+            "SELECT upstream_sha, MAX(COALESCE(completed_at, created_at)) AS last_seen \
+             FROM backport_reviews{} \
+             GROUP BY upstream_sha \
+             ORDER BY last_seen DESC \
+             LIMIT ? OFFSET ?",
+            where_clause
+        );
+        let mut group_binds = binds.clone();
+        group_binds.push(limit_groups.into());
+        group_binds.push(offset_groups.into());
+        let mut rows = self.conn.query(&group_sql, group_binds).await?;
+        let mut shas: Vec<String> = Vec::new();
+        while let Ok(Some(row)) = rows.next().await {
+            shas.push(row.get(0)?);
+        }
+        if shas.is_empty() {
+            return Ok((Vec::new(), total_groups));
+        }
+
+        // Fetch all rows for those shas. Build (?,?,?...) placeholders.
+        let placeholders = std::iter::repeat_n("?", shas.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        // We refetch with the same outer filters so verdict / version
+        // filtering applies cell-by-cell, not just to the group selection.
+        let row_sql = format!(
+            "SELECT id, upstream_sha, queue_sha, target_version, target_branch, subject, \
+                    verdict, confidence, summary, status, created_at, completed_at \
+             FROM backport_reviews \
+             WHERE upstream_sha IN ({}){} \
+             ORDER BY upstream_sha, target_version",
+            placeholders,
+            if filters.is_empty() {
+                String::new()
+            } else {
+                format!(" AND {}", filters.join(" AND "))
+            }
+        );
+        let mut row_binds: Vec<libsql::Value> = shas.iter().map(|s| s.clone().into()).collect();
+        row_binds.extend(binds);
+        let mut rows = self.conn.query(&row_sql, row_binds).await?;
+        let mut out = Vec::new();
+        while let Ok(Some(row)) = rows.next().await {
+            out.push(BackportRow {
+                id: row.get(0)?,
+                upstream_sha: row.get(1)?,
+                queue_sha: row.get(2)?,
+                target_version: row.get(3)?,
+                target_branch: row.get(4)?,
+                subject: row.get(5).unwrap_or_default(),
+                verdict: row.get(6).ok(),
+                confidence: row.get(7).ok(),
+                summary: row.get(8).ok(),
+                status: row.get(9).unwrap_or_default(),
+                created_at: row.get(10).unwrap_or(0),
+                completed_at: row.get(11).ok(),
+            });
+        }
+        Ok((out, total_groups))
+    }
+
+    /// Fetch a single backport review with its findings.
+    pub async fn get_backport_review(&self, id: i64) -> Result<Option<BackportRowDetail>> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT id, upstream_sha, queue_sha, target_version, target_branch, subject, \
+                        verdict, confidence, summary, status, model_name, provider, \
+                        tokens_in, tokens_out, tokens_cached, logs, failed_reason, \
+                        created_at, completed_at \
+                 FROM backport_reviews WHERE id = ?",
+                libsql::params![id],
+            )
+            .await?;
+        let detail = if let Ok(Some(row)) = rows.next().await {
+            BackportRowDetail {
+                id: row.get(0)?,
+                upstream_sha: row.get(1)?,
+                queue_sha: row.get(2)?,
+                target_version: row.get(3)?,
+                target_branch: row.get(4)?,
+                subject: row.get(5).unwrap_or_default(),
+                verdict: row.get(6).ok(),
+                confidence: row.get(7).ok(),
+                summary: row.get(8).ok(),
+                status: row.get(9).unwrap_or_default(),
+                model_name: row.get(10).ok(),
+                provider: row.get(11).ok(),
+                tokens_in: row.get(12).ok(),
+                tokens_out: row.get(13).ok(),
+                tokens_cached: row.get(14).ok(),
+                logs: row.get(15).ok(),
+                failed_reason: row.get(16).ok(),
+                created_at: row.get(17).unwrap_or(0),
+                completed_at: row.get(18).ok(),
+                findings: Vec::new(),
+            }
+        } else {
+            return Ok(None);
+        };
+
+        // Findings come from the existing findings table where
+        // backport_review_id = id. Fall back to review_id matches when
+        // backport_review_id is null on legacy rows.
+        let mut detail = detail;
+        let mut frows = self
+            .conn
+            .query(
+                "SELECT severity, severity_explanation, problem FROM findings \
+                 WHERE backport_review_id = ? OR (backport_review_id IS NULL AND review_id = ?)",
+                libsql::params![id, id],
+            )
+            .await?;
+        while let Ok(Some(row)) = frows.next().await {
+            let severity_int: i32 = row.get(0).unwrap_or(1);
+            detail.findings.push(BackportFindingRow {
+                severity: severity_int,
+                severity_explanation: row.get(1).ok(),
+                problem: row.get(2).unwrap_or_default(),
+            });
+        }
+        Ok(Some(detail))
+    }
+
+    /// Distinct target_versions present across all backport reviews,
+    /// sorted high-to-low (semver-ish: split on '.' and compare numerically).
+    /// Used by the dashboard to render the matrix column header.
+    pub async fn distinct_backport_versions(&self) -> Result<Vec<String>> {
+        let mut rows = self
+            .conn
+            .query("SELECT DISTINCT target_version FROM backport_reviews", ())
+            .await?;
+        let mut out: Vec<String> = Vec::new();
+        while let Ok(Some(row)) = rows.next().await {
+            out.push(row.get(0)?);
+        }
+        out.sort_by(|a, b| version_key(b).cmp(&version_key(a)));
+        Ok(out)
     }
 
     /// Fetch a cached backport-review verdict if one exists.
