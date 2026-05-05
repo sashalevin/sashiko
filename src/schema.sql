@@ -244,3 +244,38 @@ CREATE INDEX IF NOT EXISTS idx_ai_interactions_tokens ON ai_interactions(id, tok
 CREATE INDEX IF NOT EXISTS idx_reviews_grouping ON reviews(provider, model, status, interaction_id);
 CREATE INDEX IF NOT EXISTS idx_tool_usages_stats ON tool_usages(provider, model, tool_name, output_length);
 
+-- Stable-tree backport reviews. One row per (upstream_sha, target_version).
+-- The pipeline walks a git range in stable-rc/queue/<ver>, extracts the upstream
+-- SHA from the "(cherry picked from commit ...)" trailer, and emits a verdict
+-- on whether the queued backport is correct/safe/shippable.
+CREATE TABLE IF NOT EXISTS backport_reviews (
+    id INTEGER PRIMARY KEY,
+    upstream_sha TEXT NOT NULL,
+    queue_sha TEXT NOT NULL,
+    target_version TEXT NOT NULL,
+    target_branch TEXT NOT NULL,
+    subject TEXT,
+    verdict TEXT CHECK(verdict IN ('yes','no','needs_review')),
+    confidence REAL,
+    summary TEXT,
+    status TEXT NOT NULL DEFAULT 'Pending', -- Pending, In Review, Reviewed, Failed
+    model_name TEXT,
+    prompts_git_hash TEXT,
+    provider TEXT,
+    tokens_in INTEGER,
+    tokens_out INTEGER,
+    tokens_cached INTEGER,
+    logs TEXT,
+    failed_reason TEXT,
+    created_at INTEGER NOT NULL,
+    completed_at INTEGER,
+    UNIQUE(upstream_sha, target_version)
+);
+CREATE INDEX IF NOT EXISTS idx_backport_reviews_status ON backport_reviews(status);
+CREATE INDEX IF NOT EXISTS idx_backport_reviews_version ON backport_reviews(target_version);
+CREATE INDEX IF NOT EXISTS idx_backport_reviews_verdict ON backport_reviews(verdict);
+CREATE INDEX IF NOT EXISTS idx_backport_reviews_upstream ON backport_reviews(upstream_sha);
+
+-- The findings.backport_review_id column is added by Database::migrate_findings()
+-- in db.rs (idempotent ALTER) so this schema can be re-run cleanly.
+

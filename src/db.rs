@@ -70,6 +70,15 @@ pub struct ReleaseReview {
     pub findings: Vec<serde_json::Value>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CachedBackportReview {
+    pub id: i64,
+    pub queue_sha: String,
+    pub verdict: String,
+    pub confidence: Option<f64>,
+    pub summary: Option<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct MessageRow {
     pub id: i64,
@@ -570,6 +579,18 @@ impl Database {
             .execute("ALTER TABLE findings DROP COLUMN line_number", ())
             .await;
 
+        // Backport reviewer: link findings to the new backport_reviews table.
+        let _ = self
+            .try_add_column("findings", "backport_review_id", "INTEGER")
+            .await;
+        let _ = self
+            .try_create_index(
+                "idx_findings_backport_review",
+                "findings",
+                "backport_review_id",
+            )
+            .await;
+
         let _ = self.migrate_tool_usages().await;
         Ok(())
     }
@@ -761,6 +782,143 @@ impl Database {
             )
             .await?;
         Ok(())
+    }
+
+    /// Insert (or fetch existing) backport-review row for `(upstream_sha,
+    /// target_version)`. Returns the id and a `cached` flag indicating
+    /// whether a row already existed with a non-null verdict (so the
+    /// orchestrator can short-circuit work when --no-cache is off).
+    /// `queue_sha` on the existing row is updated if it has changed —
+    /// the queue branch frequently rebases.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn upsert_backport_review(
+        &self,
+        upstream_sha: &str,
+        queue_sha: &str,
+        target_version: &str,
+        target_branch: &str,
+        subject: &str,
+        provider: Option<&str>,
+        model_name: Option<&str>,
+        prompts_git_hash: Option<&str>,
+    ) -> Result<(i64, bool)> {
+        // Look up existing row first.
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT id, queue_sha, verdict FROM backport_reviews WHERE upstream_sha = ? AND target_version = ?",
+                libsql::params![upstream_sha, target_version],
+            )
+            .await?;
+
+        if let Ok(Some(row)) = rows.next().await {
+            let id: i64 = row.get(0)?;
+            let existing_queue_sha: String = row.get(1)?;
+            let verdict: Option<String> = row.get(2).ok();
+            if existing_queue_sha != queue_sha {
+                self.conn
+                    .execute(
+                        "UPDATE backport_reviews SET queue_sha = ?, status = 'Pending', verdict = NULL, completed_at = NULL WHERE id = ?",
+                        libsql::params![queue_sha, id],
+                    )
+                    .await?;
+                return Ok((id, false));
+            }
+            return Ok((id, verdict.is_some()));
+        }
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs() as i64;
+        let mut rows = self
+            .conn
+            .query(
+                "INSERT INTO backport_reviews (upstream_sha, queue_sha, target_version, target_branch, subject, provider, model_name, prompts_git_hash, status, created_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Pending', ?) RETURNING id",
+                libsql::params![
+                    upstream_sha,
+                    queue_sha,
+                    target_version,
+                    target_branch,
+                    subject,
+                    provider,
+                    model_name,
+                    prompts_git_hash,
+                    now
+                ],
+            )
+            .await?;
+        if let Ok(Some(row)) = rows.next().await {
+            Ok((row.get(0)?, false))
+        } else {
+            Err(anyhow::anyhow!("Failed to insert backport_review row"))
+        }
+    }
+
+    /// Mark a backport review complete with a verdict and summary.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn complete_backport_review(
+        &self,
+        id: i64,
+        verdict: &str,
+        confidence: Option<f64>,
+        summary: Option<&str>,
+        status: &str,
+        tokens_in: Option<i64>,
+        tokens_out: Option<i64>,
+        tokens_cached: Option<i64>,
+        logs: Option<&str>,
+    ) -> Result<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs() as i64;
+        self.conn
+            .execute(
+                "UPDATE backport_reviews \
+                 SET verdict = ?, confidence = ?, summary = ?, status = ?, tokens_in = ?, tokens_out = ?, tokens_cached = ?, logs = ?, completed_at = ? \
+                 WHERE id = ?",
+                libsql::params![
+                    verdict,
+                    confidence,
+                    summary,
+                    status,
+                    tokens_in,
+                    tokens_out,
+                    tokens_cached,
+                    logs,
+                    now,
+                    id
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Fetch a cached backport-review verdict if one exists.
+    pub async fn get_cached_backport_review(
+        &self,
+        upstream_sha: &str,
+        target_version: &str,
+    ) -> Result<Option<CachedBackportReview>> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT id, queue_sha, verdict, confidence, summary FROM backport_reviews \
+                 WHERE upstream_sha = ? AND target_version = ? AND verdict IS NOT NULL",
+                libsql::params![upstream_sha, target_version],
+            )
+            .await?;
+        if let Ok(Some(row)) = rows.next().await {
+            Ok(Some(CachedBackportReview {
+                id: row.get(0)?,
+                queue_sha: row.get(1)?,
+                verdict: row.get(2)?,
+                confidence: row.get(3).ok(),
+                summary: row.get(4).ok(),
+            }))
+        } else {
+            Ok(None)
+        }
     }
 
     pub async fn create_ai_interaction(&self, params: AiInteractionParams<'_>) -> Result<()> {
