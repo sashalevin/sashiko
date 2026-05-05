@@ -22,6 +22,7 @@
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use sashiko::ai::create_provider;
 use sashiko::backport_reviewer::{BackportReviewer, BackportRunConfig, validate_inputs};
 use sashiko::db::Database;
 use sashiko::settings::Settings;
@@ -110,6 +111,12 @@ async fn main() -> Result<()> {
     db.migrate().await.context("running migrations")?;
     let db = Arc::new(db);
 
+    let provider = create_provider(&settings).context("creating AI provider")?;
+    info!(
+        "AI provider model: {}",
+        provider.get_capabilities().model_name
+    );
+
     let cfg = BackportRunConfig {
         target_version: args.version.clone(),
         range: args.range.clone(),
@@ -119,7 +126,7 @@ async fn main() -> Result<()> {
         stages: args.stages.clone(),
     };
 
-    let reviewer = BackportReviewer::new(db, cfg.concurrency);
+    let reviewer = BackportReviewer::new(db, provider, cfg.concurrency);
     let summary = reviewer.run(cfg).await.context("running backport review")?;
 
     eprintln!(
