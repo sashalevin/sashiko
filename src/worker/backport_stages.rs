@@ -573,38 +573,63 @@ parent of the queue commit, which represents the tree state\n\
 immediately before this cherry-pick lands. It includes everything in\n\
 {tb} plus every queued commit ahead of this one. It does NOT include\n\
 this commit itself or any later queue commits.\n\n\
-HOW TO PROBE PRESENCE WITHOUT BROKEN ANCESTRY TESTS. Do NOT use\n\
-`git log A..B` to ask \"is A an ancestor of B\" — `A..B` returns\n\
-\"commits reachable from B not from A\", which is non-empty in BOTH\n\
-the ancestor and non-ancestor cases and is not a clean signal. Use\n\
-the patterns below instead, which read state directly and so cannot\n\
-be misinterpreted:\n\
-  - SUBJECT search:\n\
-      `git_log {qsha}^ --grep='<distinctive-keyword>' -n 5`\n\
-      → emits the commit if its subject contains the keyword AND it's\n\
-        in {qsha}^'s history. Empty result = not in this history\n\
-        (or no subject match — pick a subject keyword distinctive\n\
-        enough to avoid false misses).\n\
-  - SHA-string search (works when stable trees record the upstream\n\
-    SHA in their cherry-pick trailer):\n\
-      `git_log {qsha}^ --grep='<buggy-sha-prefix>' -n 5`\n\
-  - DIRECT FILE READ: read the file at {qsha}^ and inspect whether\n\
-    the relevant code is present:\n\
-      `git_show {qsha}^:<file_path>`\n\
-    This is the most reliable signal — you see the actual state.\n\n\
+HOW TO PROBE PRESENCE — USE STATE READS, NOT COMMIT-PRESENCE\n\
+HEURISTICS. The available tools (`git_log --grep` and `git_show`)\n\
+do NOT give clean answers to \"is commit X in ref Y's history\".\n\
+Specifically:\n\
+\n\
+  - `git log <ref> --grep='<sha-prefix>'` searches COMMIT MESSAGES.\n\
+    On a stable tree it finds backport-of-X entries (because the\n\
+    cherry-pick trailer records the upstream SHA), but on mainline\n\
+    it finds only commits that REFERENCE X (e.g. `Fixes: <X>`\n\
+    trailers) — NOT commit X itself. A negative result on mainline\n\
+    does not mean X is absent.\n\
+  - `git log <ref> --grep='<subject-keyword>'` is a heuristic.\n\
+    Similar subjects in the same subsystem produce false positives;\n\
+    Greg sometimes rewrites subjects (e.g. adds a subsystem prefix)\n\
+    so a stable backport's subject may differ from upstream.\n\
+  - `git log A..B` is NOT an ancestor test. `A..B` returns commits\n\
+    reachable from B not from A; the output is non-empty in both\n\
+    the ancestor and non-ancestor cases. Do not use it for presence\n\
+    checks.\n\
+\n\
+THE RELIABLE TEST is direct state comparison: read the modified\n\
+file at {qsha}^ and compare to the upstream pre-image (the\n\
+\"before\" state visible in the upstream commit's diff). The bug\n\
+exists in this tree iff the buggy pattern is present in\n\
+{qsha}^:<file>; the fix is appropriate iff the patch transforms\n\
+that buggy state into the upstream post-image (or close to it,\n\
+allowing for stable-specific adjustments).\n\
+\n\
+For commit-level presence checks, use them as CORROBORATING\n\
+signals only, with awareness of their failure modes:\n\
+  - On STABLE TREES (e.g. {tb} or {qsha}^):\n\
+      `git_log <ref> --grep='cherry picked from commit <X-sha>'`\n\
+    finds the backport entry for upstream X if X has been picked\n\
+    onto this tree.\n\
+  - On MAINLINE (origin/master): use `git_show <sha>` to confirm a\n\
+    commit exists; do NOT use `--grep='<sha>'` to test whether it\n\
+    has landed (that searches messages, not the commit itself).\n\n\
 3.1 FIXES: TARGETS. For every Fixes: trailer captured in stage 1:\n\
-    - Confirm the buggy commit exists at all: `git_show <buggy_sha>`\n\
-      with `suppress_diff:true` (keep the response small).\n\
-    - Determine whether it predates the {ver} branch point: read its\n\
-      committer date from `git_show`. If the date is BEFORE the {ver}\n\
-      branch was cut, the buggy commit is in {tb}. If it's AFTER, it\n\
-      can only reach {qsha}^ if someone backported it onto the queue.\n\
-    - Probe presence in {qsha}^ via SUBJECT search and/or by reading\n\
-      the file:\n\
-        `git_log {qsha}^ --grep='<buggy-subject-keyword>' -n 5`\n\
-        `git_show {qsha}^:<modified_file>` and look for the buggy code.\n\
-    - Cross-check in the released tree:\n\
-        `git_log --oneline {tb} --grep='<buggy-subject-keyword>' -n 5`\n\
+    - `git_show <buggy_sha>` with `suppress_diff:true` to confirm it\n\
+      exists in your local repo and to read its date / subject.\n\
+    - PRIMARY TEST — read the affected file at {qsha}^ and check for\n\
+      the buggy code pattern:\n\
+        `git_show {qsha}^:<modified_file>`\n\
+      Compare to the \"before\" hunks in the upstream commit's diff.\n\
+      If the buggy pattern is present at {qsha}^, the bug exists and\n\
+      the fix is meaningful. If the file at {qsha}^ already shows\n\
+      the upstream POST-image, the bug has already been resolved\n\
+      (perhaps via a different backport path) — flag this for\n\
+      stage 7 (likely needs_review unless the patch is a no-op).\n\
+    - CORROBORATING (not load-bearing) checks:\n\
+        `git_log --oneline {tb} --grep='cherry picked from commit <buggy-sha>' -n 5`\n\
+          (finds a backport of the buggy commit into the released tree)\n\
+        `git_log --oneline {qsha}^ --grep='cherry picked from commit <buggy-sha>' -n 5`\n\
+          (finds a backport queued ahead of this commit)\n\
+      A positive hit confirms the bug commit is in the effective\n\
+      tree. A negative hit DOES NOT prove absence (the file-read\n\
+      test is what decides).\n\
 3.2 CODE CONTEXT MATCHES IN THE TARGET TREE. For every file modified\n\
     in the diff, read it as it exists at {qsha}^ via\n\
     `git_show {qsha}^:<file_path>`. Compare the context lines around\n\
@@ -762,7 +787,6 @@ Tools: git_log --grep, lei_search, b4_dig, lore_thread.";
 fn stage_5(input: &StageInput) -> String {
     let tb = &input.target_branch;
     let qb = &input.queue_branch;
-    let ver = &input.target_version;
     let qsha = &input.queue_sha;
     format!(
         "STAGE 5 — Version applicability (does the bug exist in THIS tree).\n\n\
@@ -785,35 +809,30 @@ existence check below — NEVER use {qb} as the existence ref:\n\
   * `git_show {qsha}^:<path>` is the patch's pre-image — exactly what\n\
     git apply will see when the cherry-pick runs.\n\n\
 5.1 DOES THE BUG EXIST in the effective tree?\n\
+    Use the SAME presence-check discipline as stage 3 (read the file\n\
+    at {qsha}^; do NOT lean on `git log A..B` for ancestor tests; do\n\
+    NOT treat `--grep='<sha>'` as a presence test on mainline since\n\
+    that searches messages and only finds REFERENCES to the SHA, not\n\
+    the commit itself).\n\
     - If a Fixes: trailer is present:\n\
-        `git_show <buggy_sha>` with `suppress_diff:true` to confirm it\n\
-          exists at all and to read its date / subject.\n\
-      Probe presence in {qsha}^ — DIRECTLY, not via ancestry tests:\n\
-        `git_log {qsha}^ --grep='<buggy-subject-keyword>' -n 5`\n\
-          (subject search inside the effective tree's history)\n\
-        `git_log {qsha}^ --grep='<buggy-sha-prefix>' -n 5`\n\
-          (works when stable trees record the upstream SHA in their\n\
-           cherry-pick trailer)\n\
-        `git_show {qsha}^:<modified_file>` — read the file at the\n\
-          patch's pre-image and inspect whether the buggy code is\n\
-          present. This is the most reliable signal because it shows\n\
-          actual state, not history-walking heuristics.\n\
-      Cross-check in the released tree:\n\
-        `git_log --oneline {tb} --grep='<buggy-subject-keyword>' -n 5`\n\
-      Do NOT use `git log <buggy>..{qsha}^` or `{qsha}^..<buggy>` to\n\
-      decide ancestry — `git log A..B` returns commits reachable from\n\
-      B not from A, which is not a clean ancestor test (it's\n\
-      non-empty in both the ancestor and non-ancestor cases and you\n\
-      can't tell which from the output). Stick to subject/SHA grep\n\
-      and direct file reads.\n\
-      The bug exists when the buggy commit appears in a {qsha}^-scoped\n\
-      grep OR when reading {qsha}^:<file> reveals the buggy pattern\n\
-      in source. Only when neither holds — the buggy commit was\n\
-      introduced after {ver} branched AND isn't queued ahead — is\n\
-      this evidence for a NO.\n\
-    - If no Fixes:: read the upstream pre-image and check whether the\n\
-      bad pattern is reproducible from `git_show {qsha}^:<file>`.\n\
-      Stage 3.2 already did much of this; cross-reference its findings.\n\
+        `git_show <buggy_sha>` with `suppress_diff:true` to read its\n\
+          date / subject and confirm it resolves locally.\n\
+      PRIMARY TEST: read the modified file at {qsha}^ and compare to\n\
+      the upstream commit's BEFORE hunks:\n\
+        `git_show {qsha}^:<modified_file>`\n\
+      The bug exists in {qsha}^ iff the buggy pattern is present in\n\
+      that file. If the file at {qsha}^ already shows the upstream\n\
+      AFTER state (or a close variant), the bug has been resolved\n\
+      somehow (different backport path, or independent fix) — likely\n\
+      needs_review unless the patch is a clean no-op.\n\
+      Corroborate via `git_log --oneline <ref> --grep='cherry picked\n\
+      from commit <buggy-sha>' -n 5` against {tb} and {qsha}^ to spot\n\
+      a backport of the buggy commit. A hit corroborates the bug's\n\
+      presence; a miss is NOT proof of absence.\n\
+    - If no Fixes:: identify the buggy pre-image purely from the\n\
+      upstream commit's BEFORE hunks and check whether that pattern\n\
+      shows up in `git_show {qsha}^:<file>`. Stage 3.2 already did\n\
+      much of this; cross-reference its findings.\n\
 5.2 FILES AND FUNCTIONS EXIST in the effective tree:\n\
     - For every file in the diff: `git_show {qsha}^:<path>`.\n\
       Exception: if the diff itself CREATES the file (look at the diff\n\
