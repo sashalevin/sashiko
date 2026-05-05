@@ -1299,23 +1299,47 @@ impl Database {
     /// verdict/summary/tokens so the row reflects the current attempt
     /// rather than yesterday's. Called by the orchestrator immediately
     /// after `upsert_backport_review` when a re-run is starting.
+    ///
+    /// Atomic: the DELETE + UPDATE run inside a transaction so a partial
+    /// failure can't leave the row claiming a stale verdict while its
+    /// findings have already been wiped (or vice versa). Any error
+    /// propagates and aborts the per-commit review in the caller — we
+    /// must not write fresh findings on top of stale ones.
     pub async fn prepare_backport_review_for_run(&self, id: i64) -> Result<()> {
-        self.conn
-            .execute(
-                "DELETE FROM backport_findings WHERE backport_review_id = ?",
-                libsql::params![id],
-            )
-            .await?;
-        self.conn
-            .execute(
-                "UPDATE backport_reviews SET status = 'In Review', verdict = NULL, \
-                 confidence = NULL, summary = NULL, logs = NULL, failed_reason = NULL, \
-                 tokens_in = NULL, tokens_out = NULL, tokens_cached = NULL, \
-                 completed_at = NULL WHERE id = ?",
-                libsql::params![id],
-            )
-            .await?;
-        Ok(())
+        self.conn.execute("BEGIN IMMEDIATE", ()).await?;
+        let result: Result<()> = async {
+            self.conn
+                .execute(
+                    "DELETE FROM backport_findings WHERE backport_review_id = ?",
+                    libsql::params![id],
+                )
+                .await?;
+            self.conn
+                .execute(
+                    "UPDATE backport_reviews SET status = 'In Review', verdict = NULL, \
+                     confidence = NULL, summary = NULL, logs = NULL, failed_reason = NULL, \
+                     tokens_in = NULL, tokens_out = NULL, tokens_cached = NULL, \
+                     completed_at = NULL WHERE id = ?",
+                    libsql::params![id],
+                )
+                .await?;
+            Ok(())
+        }
+        .await;
+
+        match result {
+            Ok(()) => {
+                self.conn.execute("COMMIT", ()).await?;
+                Ok(())
+            }
+            Err(e) => {
+                // Best-effort rollback. If the rollback itself fails the
+                // outer error still propagates — the caller will abort
+                // the run rather than risk mixed-run state.
+                let _ = self.conn.execute("ROLLBACK", ()).await;
+                Err(e)
+            }
+        }
     }
 
     /// Insert a finding for a backport review. Lives in the dedicated

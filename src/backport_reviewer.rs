@@ -218,9 +218,41 @@ async fn review_one(
 
     // Re-runs (--no-cache, or queue_sha changed): drop stale findings
     // and clear the cached verdict before we write fresh ones, so the
-    // dashboard never mixes concerns from two runs.
+    // dashboard never mixes concerns from two runs. If the reset fails
+    // we MUST abort — writing fresh findings on top of stale ones is
+    // exactly the mixed-run state we're trying to prevent.
     if let Err(e) = db.prepare_backport_review_for_run(review_id).await {
-        warn!("failed to reset backport review {review_id} for re-run: {e}");
+        warn!(
+            "failed to reset backport review {review_id} for re-run: {e}; aborting this commit"
+        );
+        // Mark the row failed so it doesn't appear successful on the
+        // dashboard. Errors from this final mark are intentionally
+        // swallowed — we're already in a failure path.
+        let _ = db
+            .complete_backport_review(
+                review_id,
+                "needs_review",
+                None,
+                Some(&format!("review reset failed: {e}")),
+                "Failed",
+                None,
+                None,
+                None,
+                Some(&format!("{e:?}")),
+            )
+            .await;
+        return Ok(BackportReviewLine {
+            upstream_sha: Some(upstream_sha),
+            queue_sha: candidate.queue_sha,
+            target_version: cfg.target_version,
+            target_branch,
+            subject: candidate.subject,
+            verdict: "needs_review".to_string(),
+            confidence: None,
+            summary: Some(format!("review reset failed: {e}")),
+            cached: false,
+            error: Some(format!("{e}")),
+        });
     }
 
     let context_tag = format!("[bp:{} v:{}]", short_sha(&upstream_sha), cfg.target_version);
