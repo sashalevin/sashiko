@@ -16,6 +16,7 @@ pub mod metrics;
 pub mod ai;
 pub mod api;
 pub mod backport;
+pub mod backport_reviewer;
 pub mod baseline;
 pub mod db;
 pub mod email_policy;
