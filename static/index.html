@@ -967,6 +967,13 @@
             if (hash === '#/stats') {
                 return { view: 'stats', query };
             }
+            if (hash === '#/backports') {
+                return { view: 'backports', query };
+            }
+            const backportMatch = hash.match(/^#\/backport\/(\d+)$/);
+            if (backportMatch) {
+                return { view: 'backport', id: backportMatch[1], query };
+            }
             return { view: 'list', query };
         }
 
@@ -1022,6 +1029,12 @@
                         break;
                     case 'stats':
                         await renderStatsView();
+                        break;
+                    case 'backports':
+                        await renderBackportsView(route.query || {});
+                        break;
+                    case 'backport':
+                        await renderBackportDetailView(route.id);
                         break;
                     default:
                         await renderListView();
@@ -1558,6 +1571,8 @@
                             <a href="#" onclick="event.preventDefault(); openAbout();" style="font-weight:500;">About</a>
                             <span class="stats-sep"></span>
                             <a href="#/stats" style="font-weight:500;">Stats</a>
+                            <span class="stats-sep"></span>
+                            <a href="#/backports" style="font-weight:500;">Backports</a>
                         </div>
                         <div class="stats-sep"></div>
                         <div class="stats-group">
@@ -2594,6 +2609,257 @@ ${escapeHtml((data.body || '(no body)').replace(/\n+$/, ''), true, false)}${data
                     r.classList.remove('selected');
                 }
             });
+        }
+
+        // =====================================================================
+        // BACKPORT REVIEW VIEW
+        // =====================================================================
+        function backportVerdictBadge(cell) {
+            if (!cell || !cell.verdict) {
+                return `<span class="bp-cell bp-missing" title="not reviewed yet">—</span>`;
+            }
+            const map = {
+                yes: { cls: 'bp-yes', label: 'YES' },
+                no: { cls: 'bp-no', label: 'NO' },
+                needs_review: { cls: 'bp-needs', label: 'REVIEW' },
+                skipped: { cls: 'bp-skipped', label: 'SKIP' },
+            };
+            const m = map[cell.verdict] || { cls: 'bp-other', label: cell.verdict };
+            const conf = cell.confidence != null
+                ? ` ${(cell.confidence * 100).toFixed(0)}%`
+                : '';
+            const summary = cell.summary
+                ? cell.summary.replace(/"/g, '&quot;').slice(0, 200)
+                : '';
+            const title = `${cell.verdict.toUpperCase()}${conf} — ${summary}`;
+            return `<a class="bp-cell ${m.cls}" href="#/backport/${cell.id}" title="${title}">${m.label}${conf}</a>`;
+        }
+
+        async function renderBackportsView(query) {
+            const app = document.getElementById('app');
+            const page = parseInt(query.page || '1', 10);
+            const perPage = parseInt(query.per_page || '50', 10);
+            const q = query.q || '';
+            const verdict = query.verdict || '';
+            const versionFilter = query.version || '';
+
+            app.innerHTML = `
+                <div class="nav"><a href="#/" onclick="event.preventDefault(); goBack();">← Back</a></div>
+                <h1>Stable-tree backports</h1>
+                <p class="muted" style="margin-top:-0.5em;">
+                    One row per upstream commit; columns are the kernel versions it was reviewed against.
+                    Click a cell to drill into the per-version review.
+                </p>
+                <form id="bp-filters" style="display:flex; gap:0.5em; flex-wrap:wrap; margin:1em 0;">
+                    <input name="q" type="text" placeholder="Search subject or upstream SHA…"
+                        value="${escapeHtml(q)}" style="flex:1; min-width:18em;" />
+                    <input name="version" type="text" placeholder="Version (e.g. 6.12)"
+                        value="${escapeHtml(versionFilter)}" style="width:8em;" />
+                    <select name="verdict">
+                        <option value="">verdict: any</option>
+                        <option value="yes" ${verdict === 'yes' ? 'selected' : ''}>yes</option>
+                        <option value="no" ${verdict === 'no' ? 'selected' : ''}>no</option>
+                        <option value="needs_review" ${verdict === 'needs_review' ? 'selected' : ''}>needs_review</option>
+                    </select>
+                    <button type="submit">Apply</button>
+                    <a href="#/backports" style="align-self:center;">Reset</a>
+                </form>
+                <div id="bp-content" class="loading">Loading…</div>
+            `;
+
+            document.getElementById('bp-filters').addEventListener('submit', (e) => {
+                e.preventDefault();
+                const fd = new FormData(e.target);
+                const next = new URLSearchParams();
+                for (const [k, v] of fd.entries()) {
+                    if (v && v.toString().trim()) next.set(k, v.toString().trim());
+                }
+                next.set('page', '1');
+                navigate(`#/backports?${next.toString()}`);
+            });
+
+            const params = new URLSearchParams({ page, per_page: perPage });
+            if (q) params.set('q', q);
+            if (verdict) params.set('verdict', verdict);
+            if (versionFilter) params.set('version', versionFilter);
+
+            let data;
+            try {
+                const res = await fetch(`/api/backports?${params.toString()}`);
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                data = await res.json();
+            } catch (e) {
+                document.getElementById('bp-content').innerHTML =
+                    `<div class="error">Failed to load: ${escapeHtml(e.message)}</div>`;
+                return;
+            }
+
+            if (!data.groups || data.groups.length === 0) {
+                document.getElementById('bp-content').innerHTML =
+                    `<div class="muted">No backport reviews match this filter.</div>`;
+                return;
+            }
+
+            const versions = data.versions && data.versions.length
+                ? data.versions
+                : Array.from(new Set(data.groups.flatMap(g => g.cells.map(c => c.version))))
+                    .sort((a, b) => {
+                        const av = a.split('.').map(Number);
+                        const bv = b.split('.').map(Number);
+                        for (let i = 0; i < Math.max(av.length, bv.length); i++) {
+                            const d = (bv[i] || 0) - (av[i] || 0);
+                            if (d) return d;
+                        }
+                        return 0;
+                    });
+
+            const headerCells = versions.map(v => `<th class="bp-vh">${escapeHtml(v)}</th>`).join('');
+            const bodyRows = data.groups.map(g => {
+                const cellByVersion = Object.create(null);
+                for (const c of g.cells) cellByVersion[c.version] = c;
+                const cellsHtml = versions.map(v => `<td>${backportVerdictBadge(cellByVersion[v])}</td>`).join('');
+                const shaShort = g.upstream_sha.slice(0, 12);
+                const subject = escapeHtml(g.subject || '(no subject)');
+                return `<tr>
+                    <td class="bp-sha"><code>${shaShort}</code></td>
+                    <td class="bp-subject">${subject}</td>
+                    ${cellsHtml}
+                </tr>`;
+            }).join('');
+
+            const total = data.total_groups || 0;
+            const pageCount = Math.max(1, Math.ceil(total / perPage));
+            const baseHash = (() => {
+                const p = new URLSearchParams();
+                if (q) p.set('q', q);
+                if (verdict) p.set('verdict', verdict);
+                if (versionFilter) p.set('version', versionFilter);
+                p.set('per_page', String(perPage));
+                return `#/backports?${p.toString()}`;
+            })();
+            const navLinks = `
+                <div style="margin-top:1em; display:flex; gap:0.5em; align-items:center;">
+                    <button onclick="navigate('${baseHash}&page=${Math.max(1, page - 1)}')" ${page <= 1 ? 'disabled' : ''}>Prev</button>
+                    <span class="muted">Page ${page} / ${pageCount} — ${total} commits</span>
+                    <button onclick="navigate('${baseHash}&page=${Math.min(pageCount, page + 1)}')" ${page >= pageCount ? 'disabled' : ''}>Next</button>
+                </div>`;
+
+            document.getElementById('bp-content').innerHTML = `
+                <style>
+                    .bp-table { width:100%; border-collapse:collapse; font-size:0.9em; }
+                    .bp-table th, .bp-table td { padding:0.35em 0.5em; border-bottom:1px solid var(--border-light); text-align:left; vertical-align:top; }
+                    .bp-table th { background: var(--th-bg); position:sticky; top:0; }
+                    .bp-vh { text-align:center; min-width:5em; }
+                    .bp-sha code { color: var(--text-muted); }
+                    .bp-subject { max-width:48em; word-break: break-word; }
+                    .bp-cell { display:inline-block; padding:0.15em 0.5em; border-radius:0.4em; font-weight:600; font-size:0.82em; text-decoration:none; min-width:3.6em; text-align:center; }
+                    .bp-yes      { background:#1b5e20; color:#fff; }
+                    .bp-no       { background:#b71c1c; color:#fff; }
+                    .bp-needs    { background:#ed6c02; color:#fff; }
+                    .bp-skipped  { background:#616161; color:#fff; }
+                    .bp-other    { background: var(--tag-bg); color: var(--tag-text); }
+                    .bp-missing  { color: var(--text-dim); }
+                    @media (prefers-color-scheme: dark) {
+                        .bp-yes   { background:#2e7d32; }
+                        .bp-no    { background:#c62828; }
+                        .bp-needs { background:#f57c00; }
+                    }
+                </style>
+                <table class="bp-table">
+                    <thead>
+                        <tr>
+                            <th>upstream</th>
+                            <th>subject</th>
+                            ${headerCells}
+                        </tr>
+                    </thead>
+                    <tbody>${bodyRows}</tbody>
+                </table>
+                ${navLinks}
+            `;
+        }
+
+        async function renderBackportDetailView(id) {
+            const app = document.getElementById('app');
+            app.innerHTML = `
+                <div class="nav">
+                    <a href="#/backports" onclick="event.preventDefault(); navigate('#/backports');">← Backports</a>
+                </div>
+                <div id="bp-detail" class="loading">Loading…</div>
+            `;
+            let r;
+            try {
+                const res = await fetch(`/api/backport?id=${encodeURIComponent(id)}`);
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                r = await res.json();
+            } catch (e) {
+                document.getElementById('bp-detail').innerHTML =
+                    `<div class="error">Failed to load: ${escapeHtml(e.message)}</div>`;
+                return;
+            }
+            const verdictBadge = backportVerdictBadge({
+                id: r.id,
+                verdict: r.verdict,
+                confidence: r.confidence,
+                summary: r.summary,
+            }).replace(/^<a[^>]*>/, '<span class="bp-cell ' + (
+                r.verdict === 'yes' ? 'bp-yes'
+                : r.verdict === 'no' ? 'bp-no'
+                : r.verdict === 'needs_review' ? 'bp-needs'
+                : 'bp-other'
+            ) + '">').replace(/<\/a>$/, '</span>');
+
+            const findingsHtml = (r.findings || []).map(f => {
+                const sev = f.severity;
+                const sevName = ['', 'Low', 'Medium', 'High', 'Critical'][sev] || `sev-${sev}`;
+                const stage = f.severity_explanation || '';
+                return `<div class="bp-finding sev-${sev}">
+                    <div class="bp-finding-head">
+                        <span class="bp-sev">${sevName}</span>
+                        <span class="muted">${escapeHtml(stage)}</span>
+                    </div>
+                    <pre class="bp-finding-body">${escapeHtml(f.problem)}</pre>
+                </div>`;
+            }).join('') || `<div class="muted">No structured concerns recorded.</div>`;
+
+            const ts = (n) => n ? new Date(n * 1000).toISOString().replace('T', ' ').slice(0, 19) : '—';
+
+            document.getElementById('bp-detail').innerHTML = `
+                <style>
+                    .bp-detail-meta { display:grid; grid-template-columns: max-content 1fr; gap:0.4em 1.2em; margin:1em 0; font-size:0.92em; }
+                    .bp-detail-meta b { color: var(--text-muted); font-weight:500; }
+                    .bp-finding { border:1px solid var(--border-light); border-left-width:4px; border-radius:4px; padding:0.6em 0.8em; margin:0.5em 0; background: var(--card-bg); }
+                    .bp-finding.sev-1 { border-left-color:#9e9e9e; }
+                    .bp-finding.sev-2 { border-left-color:#ed6c02; }
+                    .bp-finding.sev-3 { border-left-color:#d32f2f; }
+                    .bp-finding.sev-4 { border-left-color:#7b1fa2; }
+                    .bp-finding-head { display:flex; gap:0.6em; align-items:center; margin-bottom:0.3em; }
+                    .bp-sev { font-weight:600; }
+                    .bp-finding-body { white-space:pre-wrap; word-break:break-word; margin:0; font-size:0.88em; }
+                    .bp-cell { display:inline-block; padding:0.15em 0.5em; border-radius:0.4em; font-weight:600; font-size:0.82em; min-width:3.6em; text-align:center; }
+                    .bp-yes      { background:#1b5e20; color:#fff; }
+                    .bp-no       { background:#b71c1c; color:#fff; }
+                    .bp-needs    { background:#ed6c02; color:#fff; }
+                    .bp-other    { background: var(--tag-bg); color: var(--tag-text); }
+                </style>
+                <h1 style="margin-bottom:0.2em;">${escapeHtml(r.subject || '(no subject)')}</h1>
+                <div>${verdictBadge}</div>
+                <div class="bp-detail-meta">
+                    <b>upstream sha</b> <code>${escapeHtml(r.upstream_sha)}</code>
+                    <b>queue sha</b>    <code>${escapeHtml(r.queue_sha)}</code>
+                    <b>target version</b> ${escapeHtml(r.target_version)}
+                    <b>target branch</b>  ${escapeHtml(r.target_branch)}
+                    <b>status</b>         ${escapeHtml(r.status)}
+                    <b>provider/model</b> ${escapeHtml(r.provider || '—')} / ${escapeHtml(r.model_name || '—')}
+                    <b>tokens</b>         in:${r.tokens_in ?? '—'} out:${r.tokens_out ?? '—'} cached:${r.tokens_cached ?? '—'}
+                    <b>created</b>        ${ts(r.created_at)}
+                    <b>completed</b>      ${ts(r.completed_at)}
+                </div>
+                ${r.summary ? `<h2>Summary</h2><p>${escapeHtml(r.summary)}</p>` : ''}
+                ${r.failed_reason ? `<h2>Failure</h2><pre class="bp-finding-body">${escapeHtml(r.failed_reason)}</pre>` : ''}
+                <h2>Concerns (${(r.findings || []).length})</h2>
+                ${findingsHtml}
+            `;
         }
 
         // =====================================================================
