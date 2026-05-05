@@ -79,6 +79,10 @@ pub struct StageOutcome {
     pub verdict: String, // "yes" | "no" | "needs_review"
     pub confidence: Option<f64>,
     pub summary: String,
+    /// LKML-style mailing-list-shaped reply (plain text). Empty when
+    /// the synthesis stage failed to produce one.
+    #[serde(default)]
+    pub inline_review: String,
     pub concerns: Vec<Concern>,
     pub usage: AiUsage,
     pub per_stage: Vec<StageRecord>,
@@ -181,6 +185,7 @@ impl BackportStageRunner {
                 verdict: "needs_review".into(),
                 confidence: None,
                 summary: "synthesis stage skipped".into(),
+                inline_review: String::new(),
                 concerns: all_concerns.clone(),
                 usages: vec![],
                 turns: 0,
@@ -200,6 +205,7 @@ impl BackportStageRunner {
             verdict: synth.verdict,
             confidence: synth.confidence,
             summary: synth.summary,
+            inline_review: synth.inline_review,
             concerns: synth.concerns,
             usage: total_usage,
             per_stage,
@@ -361,6 +367,7 @@ impl BackportStageRunner {
             verdict: synth.verdict,
             confidence: synth.confidence,
             summary: synth.summary,
+            inline_review: synth.inline_review,
             concerns: synth
                 .concerns
                 .into_iter()
@@ -393,6 +400,7 @@ struct SynthesisOutput {
     verdict: String,
     confidence: Option<f64>,
     summary: String,
+    inline_review: String,
     concerns: Vec<Concern>,
     usages: Vec<AiUsage>,
     turns: usize,
@@ -413,6 +421,10 @@ struct SynthesisPayload {
     confidence: Option<f64>,
     #[serde(default)]
     summary: String,
+    /// LKML-style reply shaped for the stable mailing list. Plain text;
+    /// no markdown, no all-caps, conversational tone.
+    #[serde(default)]
+    inline_review: String,
     #[serde(default)]
     concerns: Vec<Concern>,
 }
@@ -679,7 +691,39 @@ fn synthesis_output_contract(input: &StageInput) -> String {
     let ver = &input.target_version;
     format!(
         "OUTPUT FORMAT: respond with a SINGLE JSON object only, no markdown fences:\n\
-{{\n  \"verdict\": \"yes\" | \"no\" | \"needs_review\",\n  \"confidence\": <float 0.0-1.0>,\n  \"summary\": \"<one paragraph rationale, naming specific evidence>\",\n  \"concerns\": [ {{ \"kind\": \"...\", \"severity\": \"...\", \"problem\": \"...\", \"evidence\": \"...\" }}, ... ]\n}}\n\n\
+{{\n  \"verdict\": \"yes\" | \"no\" | \"needs_review\",\n  \"confidence\": <float 0.0-1.0>,\n  \"summary\": \"<one paragraph rationale, naming specific evidence>\",\n  \"inline_review\": \"<plain-text mailing-list-shaped reply — see template below>\",\n  \"concerns\": [ {{ \"kind\": \"...\", \"severity\": \"...\", \"problem\": \"...\", \"evidence\": \"...\" }}, ... ]\n}}\n\n\
+INLINE_REVIEW TEMPLATE — this is what a stable maintainer would post\n\
+in reply to the patch on stable@vger.kernel.org. Plain text only.\n\
+No markdown headers, no code fences, no all-caps. Conversational and\n\
+factual; questions over accusations; do not name the author. Wrap\n\
+prose at 78 columns. Begin with:\n\
+\n\
+  commit <upstream_sha>\n\
+  Author: <upstream-author from git_show>\n\
+  Subject: <upstream subject>\n\
+  Link: <Link: trailer if present in commit>\n\
+\n\
+  <one to three sentence summary of what the upstream commit does>\n\
+\n\
+  Reviewed for backport to {tb} (queue commit <queue_sha>).\n\
+\n\
+Then quote the relevant portion(s) of the upstream diff with `> ` at\n\
+the start of every quoted line. Snip unrelated hunks with `[ ... ]`,\n\
+keep diff headers for files where you have comments. Insert your\n\
+review comments INLINE — without `> ` — directly under the hunk they\n\
+discuss. Frame them as questions or factual observations:\n\
+  Does this rely on <symbol> which was introduced in <prereq>?\n\
+  This call is reachable from <caller>() in {tb}; that path looks fine.\n\
+  Has this been resolved upstream by <follow-up sha>?\n\
+\n\
+End with a verdict line, in lowercase prose:\n\
+  Looks correct for {tb}.\n\
+  This does not look correct for {tb}: <one-line specific defect>.\n\
+  Needs human review: <one-line reason>.\n\
+\n\
+DO NOT reference line numbers (line numbers in the source you read\n\
+are not stable for the eventual reader). Use call chains\n\
+(funcA() -> funcB()) and small code snippets in plain text instead.\n\n\
 VERDICT POLICY (the question is correctness IN THIS TREE, not stable-process eligibility):\n\
 - \"yes\": ALL of the following hold:\n\
   * The bug exists in the target tree (or this is a device-ID / quirk / build-only fix).\n\

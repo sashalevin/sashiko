@@ -258,6 +258,7 @@ CREATE TABLE IF NOT EXISTS backport_reviews (
     verdict TEXT CHECK(verdict IN ('yes','no','needs_review')),
     confidence REAL,
     summary TEXT,
+    inline_review TEXT, -- LKML-style mailing-list-shaped reply (plain text)
     status TEXT NOT NULL DEFAULT 'Pending', -- Pending, In Review, Reviewed, Failed
     model_name TEXT,
     prompts_git_hash TEXT,

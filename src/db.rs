@@ -106,6 +106,9 @@ pub struct BackportRowDetail {
     pub verdict: Option<String>,
     pub confidence: Option<f64>,
     pub summary: Option<String>,
+    /// LKML-style mailing-list-shaped reply (plain text). The original
+    /// reviewer puts equivalent content in `reviews.inline_review`.
+    pub inline_review: Option<String>,
     pub status: String,
     pub model_name: Option<String>,
     pub provider: Option<String>,
@@ -647,6 +650,12 @@ impl Database {
             )
             .await;
 
+        // Backport reviewer: LKML-style inline review (mirrors the
+        // mailing-list reviewer's reviews.inline_review field).
+        let _ = self
+            .try_add_column("backport_reviews", "inline_review", "TEXT")
+            .await;
+
         let _ = self.migrate_tool_usages().await;
         Ok(())
     }
@@ -911,7 +920,8 @@ impl Database {
         }
     }
 
-    /// Mark a backport review complete with a verdict and summary.
+    /// Mark a backport review complete with a verdict, summary, and the
+    /// LKML-style inline review.
     #[allow(clippy::too_many_arguments)]
     pub async fn complete_backport_review(
         &self,
@@ -919,6 +929,7 @@ impl Database {
         verdict: &str,
         confidence: Option<f64>,
         summary: Option<&str>,
+        inline_review: Option<&str>,
         status: &str,
         tokens_in: Option<i64>,
         tokens_out: Option<i64>,
@@ -931,12 +942,13 @@ impl Database {
         self.conn
             .execute(
                 "UPDATE backport_reviews \
-                 SET verdict = ?, confidence = ?, summary = ?, status = ?, tokens_in = ?, tokens_out = ?, tokens_cached = ?, logs = ?, completed_at = ? \
+                 SET verdict = ?, confidence = ?, summary = ?, inline_review = ?, status = ?, tokens_in = ?, tokens_out = ?, tokens_cached = ?, logs = ?, completed_at = ? \
                  WHERE id = ?",
                 libsql::params![
                     verdict,
                     confidence,
                     summary,
+                    inline_review,
                     status,
                     tokens_in,
                     tokens_out,
@@ -1077,7 +1089,7 @@ impl Database {
             .conn
             .query(
                 "SELECT id, upstream_sha, queue_sha, target_version, target_branch, subject, \
-                        verdict, confidence, summary, status, model_name, provider, \
+                        verdict, confidence, summary, inline_review, status, model_name, provider, \
                         tokens_in, tokens_out, tokens_cached, logs, failed_reason, \
                         created_at, completed_at \
                  FROM backport_reviews WHERE id = ?",
@@ -1095,16 +1107,17 @@ impl Database {
                 verdict: row.get(6).ok(),
                 confidence: row.get(7).ok(),
                 summary: row.get(8).ok(),
-                status: row.get(9).unwrap_or_default(),
-                model_name: row.get(10).ok(),
-                provider: row.get(11).ok(),
-                tokens_in: row.get(12).ok(),
-                tokens_out: row.get(13).ok(),
-                tokens_cached: row.get(14).ok(),
-                logs: row.get(15).ok(),
-                failed_reason: row.get(16).ok(),
-                created_at: row.get(17).unwrap_or(0),
-                completed_at: row.get(18).ok(),
+                inline_review: row.get(9).ok(),
+                status: row.get(10).unwrap_or_default(),
+                model_name: row.get(11).ok(),
+                provider: row.get(12).ok(),
+                tokens_in: row.get(13).ok(),
+                tokens_out: row.get(14).ok(),
+                tokens_cached: row.get(15).ok(),
+                logs: row.get(16).ok(),
+                failed_reason: row.get(17).ok(),
+                created_at: row.get(18).unwrap_or(0),
+                completed_at: row.get(19).ok(),
                 findings: Vec::new(),
             }
         } else {
@@ -1296,9 +1309,10 @@ impl Database {
 
     /// Reset a backport review row before re-running it: drop any
     /// findings persisted by a prior run and clear the cached
-    /// verdict/summary/tokens so the row reflects the current attempt
-    /// rather than yesterday's. Called by the orchestrator immediately
-    /// after `upsert_backport_review` when a re-run is starting.
+    /// verdict/summary/tokens/inline_review so the row reflects the
+    /// current attempt rather than yesterday's. Called by the
+    /// orchestrator immediately after `upsert_backport_review` when a
+    /// re-run is starting.
     ///
     /// Atomic: the DELETE + UPDATE run inside a transaction so a partial
     /// failure can't leave the row claiming a stale verdict while its
@@ -1317,7 +1331,8 @@ impl Database {
             self.conn
                 .execute(
                     "UPDATE backport_reviews SET status = 'In Review', verdict = NULL, \
-                     confidence = NULL, summary = NULL, logs = NULL, failed_reason = NULL, \
+                     confidence = NULL, summary = NULL, inline_review = NULL, \
+                     logs = NULL, failed_reason = NULL, \
                      tokens_in = NULL, tokens_out = NULL, tokens_cached = NULL, \
                      completed_at = NULL WHERE id = ?",
                     libsql::params![id],

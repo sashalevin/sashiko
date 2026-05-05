@@ -234,6 +234,7 @@ async fn review_one(
                 "needs_review",
                 None,
                 Some(&format!("review reset failed: {e}")),
+                None,
                 "Failed",
                 None,
                 None,
@@ -301,6 +302,7 @@ async fn review_one(
                 "needs_review",
                 None,
                 Some(&format!("stage runner error: {e}")),
+                None,
                 "Failed",
                 None,
                 None,
@@ -327,11 +329,17 @@ async fn review_one(
     persist_concerns(&db, review_id, &outcome.concerns).await;
 
     let usage = outcome.usage.clone();
+    let inline_review = if outcome.inline_review.trim().is_empty() {
+        None
+    } else {
+        Some(outcome.inline_review.as_str())
+    };
     db.complete_backport_review(
         review_id,
         &outcome.verdict,
         outcome.confidence,
         Some(&outcome.summary),
+        inline_review,
         "Reviewed",
         Some(usage.prompt_tokens as i64),
         Some(usage.completion_tokens as i64),

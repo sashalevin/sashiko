@@ -2841,6 +2841,8 @@ ${escapeHtml((data.body || '(no body)').replace(/\n+$/, ''), true, false)}${data
                     .bp-no       { background:#b71c1c; color:#fff; }
                     .bp-needs    { background:#ed6c02; color:#fff; }
                     .bp-other    { background: var(--tag-bg); color: var(--tag-text); }
+                    .bp-inline-review { background: var(--code-bg); border:1px solid var(--code-border); border-radius:4px; padding:1em 1.2em; white-space:pre-wrap; word-break:break-word; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:0.88em; line-height:1.45; }
+                    .bp-inline-actions { margin: 0 0 0.5em 0; }
                 </style>
                 <h1 style="margin-bottom:0.2em;">${escapeHtml(r.subject || '(no subject)')}</h1>
                 <div>${verdictBadge}</div>
@@ -2855,11 +2857,23 @@ ${escapeHtml((data.body || '(no body)').replace(/\n+$/, ''), true, false)}${data
                     <b>created</b>        ${ts(r.created_at)}
                     <b>completed</b>      ${ts(r.completed_at)}
                 </div>
+                ${r.inline_review ? `
+                    <h2>Mailing-list reply</h2>
+                    <div class="bp-inline-actions">
+                        <button id="bp-copy-inline">Copy</button>
+                    </div>
+                    <pre class="bp-inline-review" id="bp-inline-review">${escapeHtml(r.inline_review)}</pre>
+                ` : ''}
                 ${r.summary ? `<h2>Summary</h2><p>${escapeHtml(r.summary)}</p>` : ''}
                 ${r.failed_reason ? `<h2>Failure</h2><pre class="bp-finding-body">${escapeHtml(r.failed_reason)}</pre>` : ''}
                 <h2>Concerns (${(r.findings || []).length})</h2>
                 ${findingsHtml}
             `;
+
+            const copyBtn = document.getElementById('bp-copy-inline');
+            if (copyBtn) {
+                copyBtn.addEventListener('click', () => copyToClipboard(r.inline_review));
+            }
         }
 
         // =====================================================================
