@@ -164,10 +164,11 @@ async fn review_one(
     candidate: BackportCandidate,
 ) -> Result<BackportReviewLine> {
     let Some(upstream_sha) = candidate.upstream_sha.clone() else {
-        // No `(cherry picked from commit ...)` trailer. The model could
-        // try to recover this in stage 1 via lei/b4 on the Link: trailer,
-        // but for now we surface as skipped so the operator knows it
-        // needs human attention.
+        // Commit body had none of the recognised upstream-SHA markers
+        // (Greg's "commit X upstream", AUTOSEL's "[Upstream commit X]",
+        // or the cherry-pick trailer). On stable trees this typically
+        // means a version-bump commit ("Linux 7.0.4") — not actually a
+        // backport — so surface as skipped.
         return Ok(BackportReviewLine {
             upstream_sha: None,
             queue_sha: candidate.queue_sha,
@@ -176,7 +177,7 @@ async fn review_one(
             subject: candidate.subject,
             verdict: "skipped".to_string(),
             confidence: None,
-            summary: Some("no upstream SHA trailer".to_string()),
+            summary: Some("no upstream identifier found in commit body".to_string()),
             cached: false,
             error: None,
         });

@@ -33,28 +33,77 @@ pub struct BackportCandidate {
     pub subject: String,
 }
 
-/// Parse a commit body for the canonical
-/// `(cherry picked from commit <sha>)` trailer used by stable maintainers.
+/// Parse a commit body for an upstream-SHA marker. Recognised forms (in
+/// priority order — first match wins, except form 3 takes the LAST
+/// occurrence when multiple are present):
 ///
-/// The trailer can appear multiple times (e.g. when a commit was first
-/// backported to one tree, then to another). The *last* occurrence is the
-/// most recent provenance and is what we want.
+/// 1. `commit <40-hex> upstream[.]` — Greg KH's marker on
+///    `stable-rc/queue/<ver>` and many released stable commits. The
+///    canonical "header line" placed right after the subject.
+/// 2. `[ Upstream commit <40-hex> ]` (case-insensitive on "upstream",
+///    spaces inside brackets optional) — Sasha Levin's AUTOSEL marker.
+/// 3. `(cherry picked from commit <40-hex>)` (with optional trailing
+///    `.`) — the canonical trailer at the end of the message. Multiple
+///    occurrences possible when a commit was picked through several
+///    trees; the LAST one is the most recent provenance.
 ///
-/// Returns the 40-char lowercase hex SHA, or `None` when no trailer is
-/// found. Uppercase / mixed-case SHAs are normalised to lowercase.
+/// Returns the 40-char lowercase hex SHA, or `None` when no marker is
+/// found. Mixed-case SHAs are normalised to lowercase.
 pub fn parse_upstream_sha(commit_body: &str) -> Option<String> {
+    // First pass: form 1 ("commit <sha> upstream") and form 2
+    // ("[Upstream commit <sha>]") are first-match-wins headers.
+    for line in commit_body.lines() {
+        let trimmed = line.trim();
+
+        // Form 1: "commit <sha> upstream"
+        if let Some(after) = trimmed.strip_prefix("commit ")
+            && after.len() >= 40
+        {
+            let (sha, rest) = after.split_at(40);
+            if sha.chars().all(|c| c.is_ascii_hexdigit()) {
+                let tail = rest.trim_start();
+                if let Some(after_upstream) = tail.strip_prefix("upstream")
+                    && after_upstream
+                        .chars()
+                        .next()
+                        .is_none_or(|c| c == '.' || c.is_whitespace())
+                {
+                    return Some(sha.to_ascii_lowercase());
+                }
+            }
+        }
+
+        // Form 2: "[ Upstream commit <sha> ]" — strip outer brackets,
+        // then look for "upstream commit <sha>" (case-insensitive on
+        // the keyword).
+        if let Some(inside) = trimmed
+            .strip_prefix('[')
+            .and_then(|s| s.strip_suffix(']'))
+        {
+            let inside = inside.trim();
+            // Lowercase only the keyword prefix to test it; keep the
+            // SHA region intact for hex parsing.
+            let lower_lead: String = inside.chars().take(16).collect::<String>().to_ascii_lowercase();
+            if let Some(prefix_len) = lower_lead.strip_prefix("upstream commit ").map(|_| 16)
+                && inside.len() >= prefix_len + 40
+            {
+                let after = &inside[prefix_len..];
+                let (sha, _rest) = after.split_at(40);
+                if sha.chars().all(|c| c.is_ascii_hexdigit()) {
+                    return Some(sha.to_ascii_lowercase());
+                }
+            }
+        }
+    }
+
+    // Second pass: form 3, cherry-pick trailer (last occurrence wins).
     let mut last: Option<String> = None;
     for line in commit_body.lines() {
-        // Tolerate leading whitespace; some maintainers indent trailers.
         let trimmed = line.trim();
-        // Match "(cherry picked from commit <40 hex>)"; allow trailing "."
-        // (some trees terminate the trailer with a period) and surrounding
-        // text after the closing paren.
         let prefix = "(cherry picked from commit ";
         let Some(after) = trimmed.strip_prefix(prefix) else {
             continue;
         };
-        // SHA is 40 hex chars; consume exactly that prefix.
         if after.len() < 40 {
             continue;
         }
@@ -62,7 +111,6 @@ pub fn parse_upstream_sha(commit_body: &str) -> Option<String> {
         if !sha.chars().all(|c| c.is_ascii_hexdigit()) {
             continue;
         }
-        // Remainder must start with ')' (possibly followed by '.', whitespace, or end).
         if !rest.starts_with(')') {
             continue;
         }
@@ -144,6 +192,62 @@ mod tests {
     use super::*;
     use std::process::Command as StdCommand;
     use tempfile::TempDir;
+
+    #[test]
+    fn extracts_greg_queue_marker() {
+        // The canonical first-body-line form on stable-rc/queue/* and
+        // released stable trees alike.
+        let body = "ipmi:ssif: NULL thread on error\n\n\
+             commit a8aebe93a4938c0ca1941eeaae821738f869be3d upstream.\n\n\
+             Cleanup code was checking the thread for NULL.\n";
+        assert_eq!(
+            parse_upstream_sha(body).as_deref(),
+            Some("a8aebe93a4938c0ca1941eeaae821738f869be3d")
+        );
+    }
+
+    #[test]
+    fn extracts_greg_queue_marker_no_period() {
+        let body = "subject\n\ncommit 1111111111111111111111111111111111111111 upstream\n\nbody\n";
+        assert_eq!(
+            parse_upstream_sha(body).as_deref(),
+            Some("1111111111111111111111111111111111111111")
+        );
+    }
+
+    #[test]
+    fn extracts_autosel_bracket_marker() {
+        // Sasha's AUTOSEL marker.
+        let body = "mei: me: add nova lake point H DID\n\n\
+             [ Upstream commit a5a1804332afc7035d5c5b880548262e81d796bc ]\n\n\
+             Add Nova Lake H device id.\n";
+        assert_eq!(
+            parse_upstream_sha(body).as_deref(),
+            Some("a5a1804332afc7035d5c5b880548262e81d796bc")
+        );
+    }
+
+    #[test]
+    fn extracts_autosel_bracket_marker_no_inner_spaces() {
+        let body = "subj\n\n\
+             [Upstream commit 2222222222222222222222222222222222222222]\n\nbody\n";
+        assert_eq!(
+            parse_upstream_sha(body).as_deref(),
+            Some("2222222222222222222222222222222222222222")
+        );
+    }
+
+    #[test]
+    fn header_marker_takes_priority_over_cherry_pick_trailer() {
+        let body = "subj\n\n\
+             commit aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa upstream.\n\n\
+             body\n\n\
+             (cherry picked from commit bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb)\n";
+        assert_eq!(
+            parse_upstream_sha(body).as_deref(),
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
+    }
 
     #[test]
     fn extracts_single_trailer() {
