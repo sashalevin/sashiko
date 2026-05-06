@@ -696,22 +696,30 @@ INLINE_REVIEW TEMPLATE — this is what a stable maintainer would post\n\
 in reply to the patch on stable@vger.kernel.org. Plain text only.\n\
 No markdown headers, no code fences, no all-caps. Conversational and\n\
 factual; questions over accusations; do not name the author. Wrap\n\
-prose at 78 columns. Begin with:\n\
+prose at 78 columns.\n\
 \n\
-  commit <upstream_sha>\n\
-  Author: <upstream-author from git_show>\n\
-  Subject: <upstream subject>\n\
-  Link: <Link: trailer if present in commit>\n\
+QUOTE THE QUEUE COMMIT (the patch actually being applied to {tb}).\n\
+Do not quote the upstream commit — the upstream material is\n\
+reference context for your reasoning, not the artifact under review.\n\
 \n\
-  <one to three sentence summary of what the upstream commit does>\n\
+Begin with header lines drawn from the queue commit:\n\
 \n\
-  Reviewed for backport to {tb} (queue commit <queue_sha>).\n\
+  commit <queue_sha>\n\
+  Author: <queue-commit author from the queue commit's message>\n\
+  Subject: <queue subject>\n\
+  Link: <Link: trailer if present in the queue commit's message>\n\
+  Upstream: <upstream_sha>\n\
 \n\
-Then quote the relevant portion(s) of the upstream diff with `> ` at\n\
-the start of every quoted line. Snip unrelated hunks with `[ ... ]`,\n\
-keep diff headers for files where you have comments. Insert your\n\
-review comments INLINE — without `> ` — directly under the hunk they\n\
-discuss. Frame them as questions or factual observations:\n\
+  <one to three sentence summary of what the commit does>\n\
+\n\
+  Reviewed for backport to {tb} (parent: <queue_sha>^).\n\
+\n\
+Then quote the relevant portion(s) of the QUEUE COMMIT's diff with\n\
+`> ` at the start of every quoted line. Snip unrelated hunks with\n\
+`[ ... ]`, keep diff headers for files where you have comments.\n\
+Insert your review comments INLINE — without `> ` — directly under\n\
+the hunk they discuss. Frame them as questions or factual\n\
+observations:\n\
   Does this rely on <symbol> which was introduced in <prereq>?\n\
   This call is reachable from <caller>() in {tb}; that path looks fine.\n\
   Has this been resolved upstream by <follow-up sha>?\n\
@@ -1014,20 +1022,72 @@ fn build_stage_user_prompt(stage: u8, input: &StageInput, prior: &[StageRecord])
 }
 
 fn build_synthesis_user_prompt(input: &StageInput, prior: &[StageRecord]) -> String {
+    // The synthesis stage runs WITHOUT tools, so it must receive every
+    // raw material it needs to write the inline review (header fields,
+    // diff to quote) directly in the prompt. No git_show calls are
+    // possible here — if it isn't in the prompt, the model can't see it.
+    let upstream_sha = input
+        .upstream_sha
+        .as_deref()
+        .unwrap_or("(unknown upstream)");
+
+    let upstream_section = match (&input.upstream_body, &input.upstream_diff) {
+        (Some(body), Some(diff)) => format!(
+            "\n<upstream_commit sha=\"{sha}\">\n\
+             <message>\n{body}\n</message>\n\
+             <diff>\n{diff}\n</diff>\n\
+             </upstream_commit>\n",
+            sha = upstream_sha,
+            body = trim_block(body, 4000),
+            diff = trim_block(diff, 12000),
+        ),
+        (Some(body), None) => format!(
+            "\n<upstream_commit sha=\"{sha}\">\n\
+             <message>\n{body}\n</message>\n\
+             <diff>(unavailable; quote from prior stage findings only)</diff>\n\
+             </upstream_commit>\n",
+            sha = upstream_sha,
+            body = trim_block(body, 4000),
+        ),
+        _ => format!(
+            "\n<upstream_commit sha=\"{sha}\">\n\
+             (upstream body and diff unavailable — your inline_review must\n\
+             quote from the queue commit instead, and explicitly say so)\n\
+             </upstream_commit>\n",
+            sha = upstream_sha,
+        ),
+    };
+
+    let queue_section = format!(
+        "\n<queue_commit sha=\"{sha}\" branch=\"{branch}\">\n\
+         <subject>{subject}</subject>\n\
+         <message>\n{body}\n</message>\n\
+         <diff>\n{diff}\n</diff>\n\
+         </queue_commit>\n",
+        sha = input.queue_sha,
+        branch = input.queue_branch,
+        subject = input.queue_subject,
+        body = trim_block(&input.queue_body, 4000),
+        diff = trim_block(&input.queue_diff, 12000),
+    );
+
     let mut s = format!(
-        "Synthesize a verdict for the queued backport of {} on {} (target {}).\n\n\
-         <queue_commit sha=\"{}\">\n\
-         <subject>{}</subject>\n\
-         </queue_commit>\n\n\
+        "Synthesize a verdict for the queued backport of {upstream_sha} on \
+         {qb} (target {ver}).\n\
+         You have NO tools available in this stage — every fact and every\n\
+         line you quote in inline_review must come from the material below\n\
+         or from the prior_stages findings. Do not invent SHAs, function\n\
+         names, or diff lines. The QUEUE COMMIT is the artifact under\n\
+         review and is what the inline_review must quote (with `> `\n\
+         prefixes); upstream material is reference context for your\n\
+         reasoning, not for quoting.\n\
+         {queue}{upstream}\n\
          <prior_stages>\n",
-        input
-            .upstream_sha
-            .as_deref()
-            .unwrap_or("(unknown upstream)"),
-        input.queue_branch,
-        input.target_version,
-        input.queue_sha,
-        input.queue_subject,
+        upstream_sha = upstream_sha,
+        qb = input.queue_branch,
+        ver = input.target_version,
+        upstream = upstream_section,
+        queue = queue_section,
     );
     for rec in prior {
         s.push_str(&format!(
