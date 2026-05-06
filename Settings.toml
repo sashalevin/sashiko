@@ -44,7 +44,7 @@ temperature = 1.0
 
 # Delegate to ~/cursor.sh; the script handles quota retries and HEAD rollback.
 [ai.script]
-command = "/home/sasha/llm.sh"
+command = "/home/sasha/claude.sh"
 timeout_secs = 1800
 context_window_size = 200000
 
