@@ -42,9 +42,9 @@ temperature = 1.0
 # max_input_tokens = 180000
 # max_interactions = 150
 
-# Delegate to ~/cursor.sh; the script handles quota retries and HEAD rollback.
+# Delegate to ~/llm.sh; the script handles quota retries and HEAD rollback.
 [ai.script]
-command = "/home/sasha/claude.sh"
+command = "/home/sasha/llm.sh"
 timeout_secs = 1800
 context_window_size = 200000
 
