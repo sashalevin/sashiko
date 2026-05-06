@@ -537,6 +537,18 @@ fn shared_system_prompt(input: &StageInput) -> String {
          QUEUE BRANCH:   {queue_branch}    (this commit + its peers, queued for next release)\n\
          QUEUE SHA:      {queue_sha}\n\
          UPSTREAM SHA:   {upstream}        (original commit on origin/master)\n\n\
+         KERNEL GIT TREE LOCATION (CRITICAL):\n\
+         - The kernel git repository is at `./third_party/linux` relative to\n\
+           the current working directory (which is the sashiko project root).\n\
+           ALL kernel refs ({target_branch}, {queue_branch}, origin/master,\n\
+           upstream SHAs, Fixes: targets) live inside that submodule and are\n\
+           NOT in the sashiko repo. When you run git directly, ALWAYS use\n\
+           `git -C third_party/linux <cmd>` (or `cd third_party/linux` once\n\
+           and run from there). A bare `git show <sha>` from the sashiko root\n\
+           will fail with \"unknown revision\" because the SHA isn't in\n\
+           sashiko's object store.\n\
+         - lei is installed and reachable at `lei` (no setup needed). Network\n\
+           access is permitted; `lei q --no-save` is safe and free.\n\n\
          CRITICAL git rules:\n\
          - NEVER use `git log --all` or any --all flag — it scans hundreds of\n\
            branches and takes hours. Use specific refs (`origin/master`,\n\
